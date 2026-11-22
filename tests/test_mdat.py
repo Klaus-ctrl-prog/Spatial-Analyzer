@@ -98,6 +98,36 @@ class TestMdatParserSweepVsRta:
         record = MdatParser().parse_dict(data)
         assert record.is_sweep is False
 
+    def test_single_sample_impulse_response_is_not_sweep(self):
+        # Grenzfall: genau ein Sample - kein "Rest" zum Vergleich moeglich,
+        # per Definition (ir.samples.size <= 1) als nicht-Sweep behandelt.
+        data = _base_sweep_dict()
+        data["impulse_response"]["samples"] = [0.9]
+        record = MdatParser().parse_dict(data)
+        assert record.is_sweep is False
+
+    def test_all_zero_samples_is_not_sweep(self):
+        # median_rest <= 0 Zweig: ein durchgaengig stummer Kanal hat keinen
+        # erkennbaren Peak (peak_value ebenfalls 0, also nicht > 0).
+        data = _base_sweep_dict()
+        data["impulse_response"]["samples"] = [0.0, 0.0, 0.0, 0.0, 0.0]
+        record = MdatParser().parse_dict(data)
+        assert record.is_sweep is False
+
+    def test_peak_exactly_at_factor_three_threshold_is_sweep(self):
+        # Peak genau beim dokumentierten Schwellenwert (Faktor >= 3 ueber
+        # dem Median der restlichen Samples) - Grenzfall der Heuristik.
+        data = _base_sweep_dict()
+        data["impulse_response"]["samples"] = [0.3, 0.3, 0.9, 0.3, 0.3]
+        record = MdatParser().parse_dict(data)
+        assert record.is_sweep is True
+
+    def test_peak_just_below_factor_three_threshold_is_not_sweep(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["samples"] = [0.3, 0.3, 0.89, 0.3, 0.3]
+        record = MdatParser().parse_dict(data)
+        assert record.is_sweep is False
+
 
 class TestMdatParserStartTime:
     """Haertung (ab 2026-11-22): REWs Zeitbezug `start_time_s` darf beim
@@ -152,3 +182,155 @@ class TestMdatParserBytesNotImplemented:
     def test_parse_bytes_raises_not_implemented(self):
         with pytest.raises(NotImplementedError):
             MdatParser().parse_bytes(b"\x00\x01\x02")
+
+
+class TestMdatParserMalformedStructures:
+    """Haertung (Prioritaet 4, Issue #7): fehlerhafte/unvollstaendige
+    Strukturen und falsche Datentypen muessen als klare
+    `MdatValidationError` erkennbar sein statt als roher, nicht
+    abgefangener TypeError/ValueError/AttributeError durchzuschlagen.
+
+    Jeder Fall hier wurde vor dem Fix live reproduziert (siehe
+    Commit-Historie) und schlug mit einer uncaught Exception fehl."""
+
+    def test_frequency_response_wrong_type_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_response"] = ["not", "a", "dict"]
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_impulse_response_wrong_type_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"] = "not a dict"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_room_dimensions_wrong_type_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["room_dimensions"] = "not a dict"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_frequency_spacing_wrong_type_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_spacing"] = "not a dict"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_frequency_hz_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_response"]["frequency_hz"] = ["abc", "def"]
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_peak_index_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["peak_index"] = "abc"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_ppo_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_spacing"]["ppo"] = "abc"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_measurement_delay_s_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["measurement_delay_s"] = "abc"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_spl_offset_db_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["spl_offset_db"] = "abc"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_start_time_s_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["start_time_s"] = "abc"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_room_dimension_non_numeric_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["room_dimensions"]["length_m"] = "nicht-numerisch"
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_empty_frequency_arrays_raise_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_response"]["frequency_hz"] = []
+        data["frequency_response"]["spl_db"] = []
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_empty_impulse_response_samples_raise_validation_error(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["samples"] = []
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_phase_deg_length_mismatch_raises_validation_error(self):
+        # phase_deg hat eine andere Laenge als frequency_hz/spl_db - ohne
+        # diese Pruefung wuerden nachgelagerte punktweise Berechnungen
+        # (z. B. complex_response.to_complex) stillschweigend falsche
+        # Frequenz-Phase-Zuordnungen erhalten.
+        data = _base_sweep_dict()
+        data["frequency_response"]["phase_deg"] = [0.0, -30.0]  # 2 statt 3 Werte
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+    def test_group_delay_s_length_mismatch_raises_validation_error(self):
+        data = _base_sweep_dict()
+        data["frequency_response"]["group_delay_s"] = [0.001]
+        with pytest.raises(MdatValidationError):
+            MdatParser().parse_dict(data)
+
+
+class TestMdatParserVersionEdgeCases:
+    """Haertung (Prioritaet 4, Issue #7): Verhalten bei unbekannten/leeren
+    REW-Versionsangaben explizit dokumentiert und abgesichert."""
+
+    def test_empty_string_version_falls_back_like_missing(self):
+        data = _base_sweep_dict()
+        data["rew_version"] = ""
+        record = MdatParser().parse_dict(data, header_rew_version_fallback="5.30-beta")
+        assert record.rew_version == "5.30-beta"
+        assert record.rew_version_meaning == FieldMeaning.INFERRED
+
+    def test_unknown_future_version_string_is_accepted_as_confirmed(self):
+        # Eine REW-Version, die dem Projekt unbekannt ist (z. B. neuer als
+        # zum Zeitpunkt der Implementierung), wird nicht abgelehnt, sondern
+        # unveraendert als CONFIRMED durchgereicht - Versions-Fallback ist
+        # nur fuer FEHLENDE Angaben gedacht, nicht fuer Validierung gegen
+        # eine bekannte Versionsliste.
+        data = _base_sweep_dict()
+        data["rew_version"] = "99.99-future"
+        record = MdatParser().parse_dict(data)
+        assert record.rew_version == "99.99-future"
+        assert record.rew_version_meaning == FieldMeaning.CONFIRMED
+
+    def test_very_old_version_string_is_accepted_as_confirmed(self):
+        data = _base_sweep_dict()
+        data["rew_version"] = "4.0"
+        record = MdatParser().parse_dict(data)
+        assert record.rew_version == "4.0"
+        assert record.rew_version_meaning == FieldMeaning.CONFIRMED
+
+
+class TestMdatParserAllocationBudgetEdgeCases:
+    """Haertung (Prioritaet 4, Issue #7): Speicherbudget auch fuer die
+    optionalen frequency_response-Nebenarrays (phase_deg etc.), nicht nur
+    fuer frequency_hz/spl_db/samples."""
+
+    def test_oversized_phase_deg_alone_is_rejected(self):
+        data = _base_sweep_dict()
+        parser = MdatParser(max_allocation_bytes=1024)
+        n = 10_000
+        data["frequency_response"]["frequency_hz"] = list(np.linspace(20.0, 20000.0, n))
+        data["frequency_response"]["spl_db"] = list(np.zeros(n))
+        data["frequency_response"]["phase_deg"] = list(np.zeros(n))
+        with pytest.raises(AllocationBudgetExceeded):
+            parser.parse_dict(data)
