@@ -137,6 +137,118 @@ class TestValidateInputStructuralErrors:
         assert any("sample_interval_s" in i.path for i in issues)
 
 
+class TestValidateInputFuzzAndEdgeCases:
+    """Haertung (Prioritaet 5): Fuzz-/Grenzwerttests fuer validator.py.
+    NaN/Inf-Werte werden bewusst als `error` (nicht nur als vage
+    "ausserhalb des plausiblen Bereichs"-`warning`) gemeldet, weil
+    FrequencyGrid/interpolate_to_grid/ImpulseResponseData sie nach der
+    gleichen Haertungsrunde explizit ablehnen (siehe grid.py/models.py) -
+    run_pipeline() wuerde sonst erst dort abbrechen."""
+
+    def test_nan_freq_value_is_error_not_just_range_warning(self):
+        entry = _good_entry()
+        entry["freq_hz"][0] = float("nan")
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert any(
+            i.severity == "error" and "freq_hz" in i.path and "NaN" in i.message
+            for i in issues
+        )
+
+    def test_inf_freq_value_is_error(self):
+        entry = _good_entry()
+        entry["freq_hz"][0] = float("inf")
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert has_errors(issues)
+
+    def test_nan_spl_value_is_error(self):
+        entry = _good_entry()
+        entry["spl_db"][0] = float("nan")
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert any(
+            i.severity == "error" and "spl_db" in i.path and "NaN" in i.message
+            for i in issues
+        )
+
+    def test_nan_freq_does_not_also_trigger_monotonic_warning(self):
+        # Ein NaN-Wert soll als klarer Fehler gemeldet werden, nicht
+        # zusaetzlich (verwirrend) als "nicht streng monoton steigend" -
+        # beide Pruefungen beruhen auf Vergleichen, die bei NaN immer False
+        # sind, sollen sich hier aber nicht ueberlagern.
+        entry = _good_entry()
+        entry["freq_hz"][5] = float("nan")
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert not any("monoton" in i.message for i in issues)
+
+    def test_nan_sample_interval_is_error(self):
+        entry = _good_entry()
+        entry["impulse_response"] = {"samples": [0.1, 0.2, 0.3], "sample_interval_s": float("nan")}
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert any(
+            i.severity == "error" and "sample_interval_s" in i.path and "NaN" in i.message
+            for i in issues
+        )
+
+    def test_inf_sample_interval_is_error(self):
+        entry = _good_entry()
+        entry["impulse_response"] = {"samples": [0.1, 0.2, 0.3], "sample_interval_s": float("inf")}
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert has_errors(issues)
+
+    def test_non_numeric_impulse_response_samples_is_error(self):
+        # Vorher unbemerkt: ImpulseResponseData/np.asarray(dtype=float64)
+        # wuerde erst in der Pipeline selbst mit einem rohen ValueError
+        # abbrechen.
+        entry = _good_entry()
+        entry["impulse_response"] = {"samples": ["a", "b", "c"], "sample_interval_s": 1 / 48000}
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert any(
+            i.severity == "error" and "impulse_response.samples" in i.path for i in issues
+        )
+
+    def test_boolean_sample_interval_is_error(self):
+        # isinstance(True, int) ist True in Python - ohne expliziten
+        # bool-Ausschluss wuerde ein boolescher Wert faelschlich als
+        # gueltige Zahl durchgehen.
+        entry = _good_entry()
+        entry["impulse_response"] = {"samples": [0.1, 0.2, 0.3], "sample_interval_s": True}
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert has_errors(issues)
+
+    def test_duplicate_freq_values_trigger_monotonic_warning(self):
+        entry = _good_entry()
+        freq = entry["freq_hz"]
+        freq[11] = freq[10]  # exaktes Duplikat statt Vertauschung
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert any("monoton" in i.message for i in issues)
+
+    def test_extreme_spl_outlier_is_warning_not_crash(self):
+        entry = _good_entry()
+        entry["spl_db"][0] = 1e300
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert not has_errors(issues)
+        assert any("spl_db" in i.path for i in issues)
+
+    def test_positions_as_dict_instead_of_list_is_error_not_crash(self):
+        issues = validate_input({"positions": {"sofa_mitte": {}}})
+        assert has_errors(issues)
+
+    def test_tiny_sliver_frequency_range_does_not_crash(self):
+        entry = {"freq_hz": [100.0, 100.0001], "spl_db": [70.0, 70.0]}
+        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        issues = validate_input({"positions": positions})
+        assert isinstance(issues, list)
+
+
 class TestValidateInputWarnings:
     def test_missing_sofa_mitte_is_warning_not_error(self):
         positions = [{"id": "wander_0", "l": _good_entry(), "r": _good_entry()}]

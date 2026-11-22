@@ -17,6 +17,7 @@ vertauscht), nicht ungewoehnliche, aber reale Messungen blockieren.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,14 +95,43 @@ def _check_channel(
         except (TypeError, ValueError):
             issues.append(ValidationIssue("error", prefix, "freq_hz/spl_db enthalten nicht-numerische Werte"))
         else:
-            if any(f2 <= f1 for f1, f2 in zip(freq_f, freq_f[1:])):
+            # Haertung (Prioritaet 5): NaN/Inf werden VOR der Monotonie- und
+            # Plausibilitaetspruefung explizit als "error" erkannt, nicht
+            # erst beilaeufig als "warning" ueber die Plausibilitaetsgrenzen
+            # mitgefangen. Grund: `float('nan') <= f1` ist immer `False`,
+            # die Monotonie-Pruefung wuerde ein NaN also unbemerkt
+            # passieren lassen - und genau dieses stille Durchrutschen hat
+            # sich in `FrequencyGrid`/`interpolate_to_grid` als echter
+            # Fund bestaetigt (siehe grid.py/models.py, selbe Haertungsrunde).
+            non_finite_freq = [f for f in freq_f if not math.isfinite(f)]
+            if non_finite_freq:
+                issues.append(
+                    ValidationIssue(
+                        "error", f"{prefix}.freq_hz",
+                        f"{len(non_finite_freq)} Wert(e) sind NaN/Inf - run_pipeline() "
+                        "wuerde dies nicht abfangen (FrequencyGrid/interpolate_to_grid "
+                        "lehnen NaN/Inf explizit ab)",
+                    )
+                )
+            non_finite_spl = [s for s in spl_f if not math.isfinite(s)]
+            if non_finite_spl:
+                issues.append(
+                    ValidationIssue(
+                        "error", f"{prefix}.spl_db",
+                        f"{len(non_finite_spl)} Wert(e) sind NaN/Inf",
+                    )
+                )
+            if not non_finite_freq and any(f2 <= f1 for f1, f2 in zip(freq_f, freq_f[1:])):
                 issues.append(
                     ValidationIssue(
                         "warning", f"{prefix}.freq_hz",
                         "ist nicht streng monoton steigend - interpolate_to_grid() wird dies als Fehler ablehnen",
                     )
                 )
-            out_of_range_freq = [f for f in freq_f if not (PLAUSIBLE_FREQ_RANGE_HZ[0] <= f <= PLAUSIBLE_FREQ_RANGE_HZ[1])]
+            finite_freq = [f for f in freq_f if math.isfinite(f)]
+            out_of_range_freq = [
+                f for f in finite_freq if not (PLAUSIBLE_FREQ_RANGE_HZ[0] <= f <= PLAUSIBLE_FREQ_RANGE_HZ[1])
+            ]
             if out_of_range_freq:
                 issues.append(
                     ValidationIssue(
@@ -110,7 +140,10 @@ def _check_channel(
                         f"{PLAUSIBLE_FREQ_RANGE_HZ} Hz (z. B. {out_of_range_freq[0]}) - Tippfehler?",
                     )
                 )
-            out_of_range_spl = [s for s in spl_f if not (PLAUSIBLE_SPL_RANGE_DB[0] <= s <= PLAUSIBLE_SPL_RANGE_DB[1])]
+            finite_spl = [s for s in spl_f if math.isfinite(s)]
+            out_of_range_spl = [
+                s for s in finite_spl if not (PLAUSIBLE_SPL_RANGE_DB[0] <= s <= PLAUSIBLE_SPL_RANGE_DB[1])
+            ]
             if out_of_range_spl:
                 issues.append(
                     ValidationIssue(
@@ -132,9 +165,28 @@ def _check_channel(
                 issues.append(
                     ValidationIssue("error", f"{prefix}.impulse_response.samples", "fehlt oder ist leer")
                 )
-            if not isinstance(dt, (int, float)):
+            elif not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in samples):
+                # Haertung (Prioritaet 5): ohne diese Pruefung wuerde ein
+                # nicht-numerisches Sample (z. B. versehentlich ein String)
+                # hier unbemerkt bleiben und erst in
+                # ImpulseResponseData.__post_init__ / np.asarray(...,
+                # dtype=float64) mit einem rohen ValueError abbrechen.
+                issues.append(
+                    ValidationIssue(
+                        "error", f"{prefix}.impulse_response.samples",
+                        "enthaelt nicht-numerische Werte",
+                    )
+                )
+            if not isinstance(dt, (int, float)) or isinstance(dt, bool):
                 issues.append(
                     ValidationIssue("error", f"{prefix}.impulse_response.sample_interval_s", "fehlt oder ist keine Zahl")
+                )
+            elif not math.isfinite(dt):
+                issues.append(
+                    ValidationIssue(
+                        "error", f"{prefix}.impulse_response.sample_interval_s",
+                        "ist NaN/Inf - ImpulseResponseData lehnt das explizit ab",
+                    )
                 )
             elif not (PLAUSIBLE_SAMPLE_INTERVAL_S[0] <= dt <= PLAUSIBLE_SAMPLE_INTERVAL_S[1]):
                 issues.append(

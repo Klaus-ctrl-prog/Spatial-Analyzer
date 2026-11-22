@@ -107,6 +107,13 @@ class FrequencyGrid:
             raise ValueError("frequencies_hz muss eindimensional sein")
         if freqs.size < 2:
             raise ValueError("frequencies_hz braucht mindestens 2 Punkte")
+        # Haertung (Prioritaet 5, Haertungsphase 2026-11-22): explizit VOR
+        # der Monotonie-Pruefung, weil `np.diff([...nan...]) <= 0` wegen der
+        # NaN-Vergleichssemantik ueberall `False` ist - ein NaN im
+        # Frequenzraster wuerde diese Pruefung sonst unbemerkt passieren
+        # (siehe analoger, bereits in grid.py behobener Fund).
+        if not np.all(np.isfinite(freqs)):
+            raise ValueError("frequencies_hz darf kein NaN/Inf enthalten")
         if np.any(np.diff(freqs) <= 0):
             raise ValueError("frequencies_hz muss streng monoton steigend sein")
         self.frequencies_hz = freqs
@@ -157,6 +164,12 @@ class ImpulseResponseData:
         self.samples = np.asarray(self.samples, dtype=np.float64)
         if self.samples.ndim != 1 or self.samples.size == 0:
             raise ValueError("samples muss ein nichtleeres 1D-Array sein")
+        # Haertung (Prioritaet 5): `nan <= 0` ist `False`, ein NaN/Inf
+        # sample_interval_s wuerde den reinen "<= 0"-Check also unbemerkt
+        # passieren (gleiches Muster wie die NaN-Funde in grid.py/
+        # FrequencyGrid - siehe dortige Kommentare).
+        if not np.isfinite(self.sample_interval_s):
+            raise ValueError("sample_interval_s darf kein NaN/Inf sein")
         if self.sample_interval_s <= 0:
             raise ValueError("sample_interval_s muss positiv sein")
         if self.peak_index is None:

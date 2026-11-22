@@ -151,15 +151,42 @@ selbst (siehe Leitplanke unten).
    echte REW-.mdat-Datei. Issue #7 selbst bleibt offen und blockiert bis
    fruehestens Maerz 2027.
 
-## Prioritaet 5 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
+## Prioritaet 5 - Robustheit des Import-/Validierungspfads
 
-- Fuzz-/Grenzwerttests fuer `validator.py` (z. B. NaN/Inf in `freq_hz`/
-  `spl_db`, leere Arrays, extrem dichte oder extrem duenne Frequenzraster)
-  ueber die bereits in `mdat.py` etablierte `AllocationBudget`-Haertung
-  hinaus.
-- Pruefen, ob `grid.py`s R160-Interpolation an den Bandraendern (sehr
-  niedrige/hohe Frequenzen) numerisch stabil bleibt, inkl. Tests mit
-  bewusst knappen Ueberlappungsbereichen (`FrequencyGrid.overlap_with`).
+Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22.
+
+1. **Fuzz-/Grenzwerttests fuer `validator.py` und `grid.py`:** systematisch
+   mit ungueltigen, extremen und grenzwertigen Eingaben geprueft (NaN/Inf
+   in Frequenzen/Pegeln/`sample_interval_s`, doppelte/invertierte
+   Frequenzen, leere und einelementige Arrays, winzige Frequenzbereiche
+   ohne R160-Gitterpunkt, nicht-numerische Impulsantwort-Samples, falsche
+   Datentypen fuer `positions`, boolesche Werte an Zahlfeldern).
+2. **Gefundene rohe Abstuerze behoben** (alle vorher live reproduziert):
+   - `r160_grid()`: NaN/Inf als `start_hz`/`end_hz` schlug nicht am
+     `<= 0`-Vorzeichen-Check an (NaN-Vergleiche sind immer `False`) und
+     brach erst spaeter mit einem unklaren rohen
+     `"cannot convert float NaN to integer"` ab.
+   - `interpolate_to_grid()`: NaN/Inf im Quellraster (`source_freqs_hz`)
+     schlug aus demselben Grund nicht an der Monotonie-Pruefung an und
+     floss stillschweigend in `np.interp()` ein; ein leeres Quellraster
+     brach mit numpys eigenem unklaren Fehler ab statt mit einer
+     verstaendlichen Validierungsmeldung.
+   - `FrequencyGrid.__post_init__()` (models.py): derselbe NaN-Fund wie in
+     `grid.py` - ein NaN in `frequencies_hz` passierte die
+     Monotonie-Pruefung unbemerkt.
+   - `ImpulseResponseData.__post_init__()` (models.py): derselbe Fund fuer
+     `sample_interval_s` - ein NaN passierte den `<= 0`-Check unbemerkt.
+   - `validator.py`: nicht-numerische Impulsantwort-Samples (z. B.
+     versehentlich Strings) wurden gar nicht geprueft und waeren erst in
+     `ImpulseResponseData`/`np.asarray(..., dtype=float64)` mit einem
+     rohen `ValueError` abgebrochen; NaN/Inf in `freq_hz`/`spl_db`/
+     `sample_interval_s` wurden vorher nur unspezifisch als
+     "ausserhalb des plausiblen Bereichs"-`warning` erfasst statt als
+     klarer `error`.
+3. **Keine neuen Funktionen, keine Kopplung an `pipeline.py`:** alle
+   Aenderungen sind reine Eingabepruefungen in bereits bestehenden
+   Funktionen/Methoden; `mdat.py` bleibt wie dokumentiert unabhaengig von
+   `pipeline.py`.
 
 ## Prioritaet 6 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
 
