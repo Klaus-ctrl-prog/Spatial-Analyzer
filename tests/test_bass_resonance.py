@@ -95,14 +95,47 @@ class TestNarrowbandDecayTime:
 
 
 class TestPerceptualThreshold:
+    """Haertung (ab 2026-11-22, schliesst Issue #2): Stuetzpunkte jetzt
+    direkt aus Fazenda, Stephenson & Goldberg (2015), Abschnitt
+    "Conclusion", "artificial stimuli"-Mittelwerte (siehe Modul-Docstring
+    fuer die genaue Zitatstelle)."""
+
     def test_monotonic_decreasing_with_frequency(self):
         values = [perceptual_threshold_s(f) for f in (20.0, 50.0, 100.0, 200.0)]
         assert all(earlier > later for earlier, later in zip(values, values[1:]))
 
-    def test_clamped_outside_model_range(self):
-        low = perceptual_threshold_s(5.0)
-        at_boundary = perceptual_threshold_s(20.0)
-        assert low == pytest.approx(at_boundary)
+    @pytest.mark.parametrize(
+        "freq_hz,expected_s",
+        [(32.0, 0.90), (63.0, 0.30), (100.0, 0.27), (150.0, 0.18), (200.0, 0.17)],
+    )
+    def test_exact_support_points_match_published_values(self, freq_hz, expected_s):
+        # Direkt aus dem Fliesstext der Publikation uebernommene Werte -
+        # siehe Modul-Docstring fuer die Zitatstelle (Abschnitt "Conclusion").
+        assert perceptual_threshold_s(freq_hz) == pytest.approx(expected_s, abs=1e-9)
+
+    def test_interpolated_point_matches_log_log_linear_formula(self):
+        # Unabhaengig nachgerechneter Punkt zwischen zwei Stuetzpunkten
+        # (63 Hz / 0.30s und 100 Hz / 0.27s), um die dokumentierte
+        # Interpolationsform (linear in log10(f) UND log10(t)) direkt zu
+        # pruefen, nicht nur die Monotonie.
+        f_lo, t_lo = 63.0, 0.30
+        f_hi, t_hi = 100.0, 0.27
+        f_mid = 80.0
+        frac = (np.log10(f_mid) - np.log10(f_lo)) / (np.log10(f_hi) - np.log10(f_lo))
+        expected = 10.0 ** (np.log10(t_lo) + frac * (np.log10(t_hi) - np.log10(t_lo)))
+        assert perceptual_threshold_s(f_mid) == pytest.approx(expected, rel=1e-9)
+
+    def test_clamped_below_lowest_support_point_not_extrapolated(self):
+        # Die Studie deckt nur 32-250 Hz ab (artificial stimuli: 32-200 Hz)
+        # - unterhalb von 32 Hz wird bewusst NICHT extrapoliert, sondern
+        # der 32-Hz-Randwert konstant fortgesetzt (siehe Docstring von
+        # perceptual_threshold_s()).
+        assert perceptual_threshold_s(20.0) == pytest.approx(0.90, abs=1e-9)
+        assert perceptual_threshold_s(5.0) == pytest.approx(0.90, abs=1e-9)
+
+    def test_clamped_above_highest_support_point_not_extrapolated(self):
+        assert perceptual_threshold_s(200.0) == pytest.approx(0.17, abs=1e-9)
+        assert perceptual_threshold_s(500.0) == pytest.approx(0.17, abs=1e-9)
 
 
 class TestEvaluateDecayAgainstThreshold:
@@ -118,3 +151,15 @@ class TestEvaluateDecayAgainstThreshold:
     def test_long_decay_exceeds_threshold(self):
         result = evaluate_decay_against_threshold(5.0, 60.0)
         assert result.exceeds_perceptual_threshold is True
+
+    def test_threshold_crossing_at_exactly_calibrated_support_point(self):
+        # 100 Hz ist ein exakter Stuetzpunkt (Schwelle 0.27s, siehe
+        # TestPerceptualThreshold) - prueft den Uebergang hoerbar/unhoerbar
+        # direkt an der kalibrierten Grenze, nicht nur grob "kurz"/"lang".
+        just_below = evaluate_decay_against_threshold(0.26, 100.0)
+        exactly_at = evaluate_decay_against_threshold(0.27, 100.0)
+        just_above = evaluate_decay_against_threshold(0.28, 100.0)
+        assert just_below.exceeds_perceptual_threshold is False
+        assert exactly_at.exceeds_perceptual_threshold is False  # strikt ">", Gleichheit zaehlt nicht als Ueberschreitung
+        assert just_above.exceeds_perceptual_threshold is True
+        assert exactly_at.threshold_s == pytest.approx(0.27, abs=1e-9)

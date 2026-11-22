@@ -17,13 +17,39 @@ implementiert beides eigenstaendig:
   (narrowband_decay_time()), zusaetzlich zur schnelleren Q-Naeherung.
 
 Hinweis zu den perzeptiven Schwellen nach Fazenda, Stephenson & Goldberg
-(2015, JASA 137(3)): Die in PERCEPTUAL_THRESHOLD_MODEL hinterlegten
-Stuetzpunkte sind eine grobe, selbst gewaehlte Naeherung (Modellannahme),
-NICHT eins-zu-eins aus der Originalstudie uebernommene Zahlenwerte - die
-exakten publizierten Kurven wurden in dieser Recherchephase nicht
-Zahlenwert-fuer-Zahlenwert verifiziert. Vor einer belastbaren Bewertung
-sollte diese Tabelle gegen die Originalpublikation kalibriert werden
-(siehe docs/SPECIFICATION.md Abschnitt 3.G - verwandter offener Punkt).
+(2015, JASA 137(3), pp. 1088-1098, DOI 10.1121/1.4908217) - kalibriert am
+2026-11-22, schliesst GitHub-Issue #2:
+
+Die Stuetzpunkte in PERCEPTUAL_THRESHOLD_MODEL sind jetzt direkt aus dem
+Fliesstext der Originalpublikation uebernommen (Abschnitt "Conclusion",
+Satz "Average thresholds measured with artificial stimuli are 0.9s at
+32Hz, 0.3s at 63Hz, 0.27s at 100Hz" plus die dort ebenfalls genannten
+0.18s bei 150Hz und 0.17s bei 200Hz) - nicht aus einem Diagramm digitalisiert
+und nicht selbst gewaehlt. Verwendet wird bewusst die "artificial stimuli"-
+Kurve (absolute Schwelle mit Test-Toenen), nicht die "music stimuli"-Kurve
+(praktische Schwelle, 0.51s bei 63Hz bis 0.12s bei 250Hz) - Begruendung:
+`narrowband_decay_time()` misst eine schmalbandig gefilterte, toenerzeugte
+Abklingzeit aus der Impulsantwort, methodisch naeher an den Test-Toenen der
+Studie als an Musikmaterial.
+
+Wichtige, durch die Quelle selbst verursachte Einschraenkung (nicht durch
+uns aufgeloest, siehe Issue #2 und PR-Beschreibung): die Publikation
+widerspricht sich selbst beim Knickpunkt - das Abstract nennt einen
+"knee at 63Hz", der Ergebnisteil dagegen "A knee point at around 100Hz".
+Wir uebernehmen deshalb beide umliegenden Stuetzpunkte (63Hz UND 100Hz)
+unveraendert aus der Konklusion, statt diesen Widerspruch selbst zu
+entscheiden - die Interpolationskurve zwischen ihnen (siehe
+`perceptual_threshold_s()`) ist dadurch automatisch unser eigenes Modell,
+nicht die Position des echten Knicks.
+
+Messbereich der Studie: 32-250 Hz (artificial stimuli: 32-200 Hz). Fuer
+Frequenzen AUSSERHALB dieses Bereichs (hier: < 32 Hz, im fuer dieses
+Projekt relevanten 20-200-Hz-Fokus) wird in `perceptual_threshold_s()`
+bewusst NICHT extrapoliert, sondern auf den jeweiligen Randwert geklemmt
+(`np.clip`) - die Studie selbst warnt ausdruecklich davor, Schwellen ueber
+den gemessenen Bereich hinaus zu extrapolieren ("the extrapolation of
+obtained Q factor thresholds onto frequency dependent decay thresholds
+cannot be assumed").
 """
 
 from __future__ import annotations
@@ -40,14 +66,17 @@ DEFAULT_OCTAVE_WINDOW = 1.0
 DEFAULT_SPATIAL_TOLERANCE_HZ = 2.0
 DEFAULT_SPATIAL_PRESENCE_THRESHOLD = 0.7
 
-# Grobe, selbst gewaehlte Naeherung (siehe Modul-Docstring) - Stuetzpunkte
-# (Frequenz_Hz, max. tolerierbare Abklingzeit_s) auf einer einfachen
-# log-log-Gerade, NICHT aus Fazenda et al. (2015) abgelesen.
+# Kalibriert gegen Fazenda, Stephenson & Goldberg (2015), Abschnitt
+# "Conclusion", "artificial stimuli"-Mittelwerte (siehe Modul-Docstring für
+# die genauen Zitatstellen und die bewusst nicht aufgeloeste Knick-Frage).
+# Stuetzpunkte (Frequenz_Hz, max. tolerierbare Abklingzeit_s auf -60dB,
+# T20/T30-Konvention): direkt aus dem Text uebernommene Messwerte.
 PERCEPTUAL_THRESHOLD_MODEL: tuple[tuple[float, float], ...] = (
-    (20.0, 0.70),
-    (50.0, 0.40),
-    (100.0, 0.25),
-    (200.0, 0.15),
+    (32.0, 0.90),
+    (63.0, 0.30),
+    (100.0, 0.27),
+    (150.0, 0.18),
+    (200.0, 0.17),
 )
 
 
@@ -269,8 +298,27 @@ def narrowband_decay_time(
 
 
 def perceptual_threshold_s(freq_hz: float) -> float:
-    """Interpoliert die (Modell-)Schwelle aus PERCEPTUAL_THRESHOLD_MODEL
-    (log-log, siehe Modul-Docstring zur Herkunft/Einschraenkung)."""
+    """Interpoliert die Schwelle aus PERCEPTUAL_THRESHOLD_MODEL.
+
+    Haertungshinweis (ab 2026-11-22, Issue #2 - siehe Modul-Docstring fuer
+    die Herkunft der Stuetzpunkte):
+
+    - **Zwischen den Stuetzpunkten:** linear in log10(Frequenz) UND
+      log10(Zeit) (doppelt-logarithmische Gerade zwischen je zwei
+      benachbarten Punkten). Das ist eine EIGENE Modellentscheidung fuer
+      die Interpolationsform, nicht Teil der Originalpublikation - diese
+      gibt laut eigener Aussage keine gefittete Kurve an, nur gemessene
+      Einzelwerte (siehe Modul-Docstring). Log-log wurde gewaehlt, weil es
+      die berichtete Form ("thresholds decrease rapidly... up to about
+      100Hz where they appear to level out") qualitativ nachbildet, ohne
+      selbst einen Wert zwischen den Stuetzpunkten zu erfinden, der nicht
+      zumindest zwischen den beiden echten Nachbarwerten liegt.
+    - **Ausserhalb des Stuetzpunktbereichs (hier: < 32 Hz oder > 200 Hz):**
+      KEINE Extrapolation - der jeweilige Randwert wird per `np.clip`
+      konstant fortgesetzt (0.9s fuer alles <= 32 Hz, 0.17s fuer alles
+      >= 200 Hz). Das entspricht ausdruecklich der Warnung der
+      Originalstudie vor Extrapolation ausserhalb des gemessenen Bereichs.
+    """
     points = PERCEPTUAL_THRESHOLD_MODEL
     freqs = np.array([p[0] for p in points])
     times = np.array([p[1] for p in points])
