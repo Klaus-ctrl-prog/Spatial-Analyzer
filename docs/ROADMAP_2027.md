@@ -86,7 +86,37 @@ Fahrzeug- oder Raumvalidierung.
    ergibt. In `optimize()`s Docstring als bekannte Eigenschaft der
    Zielfunktion dokumentiert, nicht als Implementierungsfehler.
 
-## Prioritaet 3 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
+## Prioritaet 3 - Bassresonanz-Bewertung / Fazenda-Kalibrierung (GitHub-Issue #2)
+
+Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Schliesst Issue #2.
+
+1. **Abgleich gegen Fazenda, Stephenson & Goldberg (2015):** Die bisherigen
+   `PERCEPTUAL_THRESHOLD_MODEL`-Stuetzpunkte in `bass_resonance.py` waren
+   laut eigenem Docstring eine selbst gewaehlte, nicht verifizierte
+   Naeherung. Jetzt direkt aus dem Fliesstext der Originalpublikation
+   (JASA 137(3), pp. 1088-1098) uebernommen - Abschnitt "Conclusion",
+   "artificial stimuli"-Mittelwerte: 0.90s bei 32Hz, 0.30s bei 63Hz,
+   0.27s bei 100Hz, 0.18s bei 150Hz, 0.17s bei 200Hz. Bewusst NICHT die
+   "music stimuli"-Kurve verwendet (methodisch weiter von der eigenen
+   toenerzeugten Abklingmessung entfernt). Dokumentierte, nicht selbst
+   aufgeloeste Einschraenkung: die Publikation widerspricht sich selbst
+   beim Knickpunkt (Abstract: 63Hz: Ergebnisteil: ~100Hz) - beide
+   umliegenden Stuetzpunkte wurden deshalb unveraendert aus der Konklusion
+   uebernommen, statt den Widerspruch selbst zu entscheiden.
+2. **Interpolation & Randbereiche:** Dokumentiert, dass die Interpolation
+   zwischen den Stuetzpunkten (linear in log10(Frequenz) UND log10(Zeit))
+   eine EIGENE Modellentscheidung ist, nicht Teil der Publikation (diese
+   gibt keine gefittete Kurve an). Ausserhalb des Stuetzpunktbereichs
+   (< 32 Hz oder > 200 Hz) wird bewusst NICHT extrapoliert, sondern der
+   Randwert konstant fortgesetzt (`np.clip`) - entspricht der expliziten
+   Extrapolationswarnung der Originalstudie.
+3. **Grenzfaelle mit Tests abgesichert:** exakte Stuetzpunkt-Werte,
+   unabhaengig nachgerechneter Interpolationspunkt (log-log-Formel direkt
+   gegenpruefen), Klemmverhalten unter 32 Hz und ueber 200 Hz, sowie der
+   hoerbar/unhoerbar-Uebergang exakt an einem kalibrierten Stuetzpunkt
+   (100 Hz / 0.27s: knapp darunter/exakt/knapp darueber).
+
+## Prioritaet 4 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
 
 - Fuzz-/Grenzwerttests fuer `validator.py` (z. B. NaN/Inf in `freq_hz`/
   `spl_db`, leere Arrays, extrem dichte oder extrem duenne Frequenzraster)
@@ -96,7 +126,7 @@ Fahrzeug- oder Raumvalidierung.
   niedrige/hohe Frequenzen) numerisch stabil bleibt, inkl. Tests mit
   bewusst knappen Ueberlappungsbereichen (`FrequencyGrid.overlap_with`).
 
-## Prioritaet 4 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
+## Prioritaet 5 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
 
 - `sub_optimizer.py` und `eq_solver.py`: dokumentierte Sensitivitaetstests
   (wie stark aendert sich das Optimum bei kleinen Aenderungen der
@@ -107,7 +137,7 @@ Fahrzeug- oder Raumvalidierung.
   Mehrpositions-Fall mit sehr wenigen Positionen (z. B. nur 2) noch
   aussagekraeftige Streuungskennzahlen liefert.
 
-## Prioritaet 5 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
+## Prioritaet 6 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
 
 - Abgleich aller Modul-Docstrings gegen `docs/SPECIFICATION.md`, ob
   zwischenzeitliche Praezisierungen (wie die in Prioritaet 1 ergaenzten
