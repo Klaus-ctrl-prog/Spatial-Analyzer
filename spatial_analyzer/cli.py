@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import sys
 
+from spatial_analyzer.compare import run_compare
 from spatial_analyzer.pipeline import run_pipeline
+from spatial_analyzer.validator import has_errors, validate_file
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,8 +30,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument("input", help="Pfad zur JSON-Eingabedatei (siehe pipeline.py-Docstring)")
     analyze.add_argument("output_dir", help="Zielverzeichnis fuer Report, CSV, JSON, HTML und Exporte")
+    analyze.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Nur die Eingabedatei pruefen (Schema/Plausibilitaet), keine Analyse rechnen.",
+    )
+
+    compare = subparsers.add_parser(
+        "compare",
+        help="Vergleicht zwei abgeschlossene 'analyze'-Durchlaeufe (vorher/nachher).",
+    )
+    compare.add_argument("before_dir", help="Ausgabeverzeichnis der Vorher-Messung")
+    compare.add_argument("after_dir", help="Ausgabeverzeichnis der Nachher-Messung")
+    compare.add_argument("output_dir", help="Zielverzeichnis fuer compare_report.json/html")
 
     return parser
+
+
+def _run_dry_run(input_path: str) -> int:
+    issues = validate_file(input_path)
+    if not issues:
+        print(f"Keine Beanstandungen: {input_path} sieht gueltig aus.")
+        return 0
+
+    for issue in issues:
+        print(str(issue))
+
+    n_errors = sum(1 for i in issues if i.severity == "error")
+    n_warnings = len(issues) - n_errors
+    print(f"\n{n_errors} Fehler, {n_warnings} Hinweis(e).")
+    if has_errors(issues):
+        print("Eingabedatei ist NICHT lauffaehig - bitte Fehler oben beheben.")
+        return 1
+    print("Keine Fehler gefunden, nur Hinweise - 'analyze' sollte laufen.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,11 +71,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "analyze":
+        if args.dry_run:
+            return _run_dry_run(args.input)
+
+        issues = validate_file(args.input)
+        if has_errors(issues):
+            print("Eingabedatei enthaelt Fehler - Analyse wird nicht gestartet:\n")
+            for issue in issues:
+                if issue.severity == "error":
+                    print(str(issue))
+            print("\nTipp: 'analyze ... --dry-run' zeigt auch die Hinweise (Warnungen) an.")
+            return 1
+
         report = run_pipeline(args.input, args.output_dir)
         print(f"Report geschrieben nach: {args.output_dir}")
         print(f"Modenkandidaten gefunden: {len(report.mode_confirmations)}")
         print(f"EQ-Vorschlaege L: {len(report.eq_proposals_l)}, R: {len(report.eq_proposals_r)}")
         for note in report.notes:
+            print(f"Hinweis: {note}")
+        return 0
+
+    if args.command == "compare":
+        compare_report = run_compare(args.before_dir, args.after_dir, args.output_dir)
+        print(f"Vergleichsbericht geschrieben nach: {args.output_dir}")
+        for note in compare_report.notes:
             print(f"Hinweis: {note}")
         return 0
 

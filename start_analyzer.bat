@@ -65,14 +65,18 @@ rem --- Bedienhilfe / interaktive Eingabe ---
 :menu
 echo Was moechtest du tun?
 echo   [1] REW-Export (.json, siehe docs\SPECIFICATION.md fuer das Eingabeformat) analysieren
-echo   [2] Nur Kurzhilfe zum Kommandozeilen-Tool anzeigen
-echo   [3] Beenden
+echo   [2] Eingabedatei nur pruefen (--dry-run, kein Rechenlauf)
+echo   [3] A/B-Vergleich zweier Analyse-Ergebnisse (vorher/nachher)
+echo   [4] Nur Kurzhilfe zum Kommandozeilen-Tool anzeigen
+echo   [5] Beenden
 echo.
-set /p "CHOICE=Auswahl (1/2/3): "
+set /p "CHOICE=Auswahl (1/2/3/4/5): "
 
 if "%CHOICE%"=="1" goto analyze
-if "%CHOICE%"=="2" goto help
-if "%CHOICE%"=="3" goto end
+if "%CHOICE%"=="2" goto dryrun
+if "%CHOICE%"=="3" goto compare
+if "%CHOICE%"=="4" goto help
+if "%CHOICE%"=="5" goto end
 echo Ungueltige Eingabe.
 echo.
 goto menu
@@ -109,9 +113,78 @@ echo.
 pause
 goto menu
 
+:dryrun
+echo.
+set /p "INPUTFILE=Pfad zur Eingabedatei (.json), z.B. per Ziehen+Ablegen hierher: "
+if "%INPUTFILE%"=="" (
+    echo Kein Pfad eingegeben.
+    echo.
+    goto menu
+)
+set INPUTFILE=%INPUTFILE:"=%
+
+if not exist "%INPUTFILE%" (
+    echo [FEHLER] Datei nicht gefunden: %INPUTFILE%
+    echo.
+    goto menu
+)
+
+echo.
+echo Pruefe Eingabedatei (kein Rechenlauf) ...
+echo.
+%PYCMD% -m spatial_analyzer analyze "%INPUTFILE%" "." --dry-run
+echo.
+pause
+goto menu
+
+:compare
+echo.
+set /p "BEFOREDIR=Ausgabeordner der VORHER-Messung: "
+if "%BEFOREDIR%"=="" (
+    echo Kein Pfad eingegeben.
+    echo.
+    goto menu
+)
+set BEFOREDIR=%BEFOREDIR:"=%
+if not exist "%BEFOREDIR%" (
+    echo [FEHLER] Ordner nicht gefunden: %BEFOREDIR%
+    echo.
+    goto menu
+)
+
+set /p "AFTERDIR=Ausgabeordner der NACHHER-Messung: "
+if "%AFTERDIR%"=="" (
+    echo Kein Pfad eingegeben.
+    echo.
+    goto menu
+)
+set AFTERDIR=%AFTERDIR:"=%
+if not exist "%AFTERDIR%" (
+    echo [FEHLER] Ordner nicht gefunden: %AFTERDIR%
+    echo.
+    goto menu
+)
+
+set /p "COMPAREOUT=Zielordner fuer den Vergleichsbericht [Standard: .\compare_output]: "
+if "%COMPAREOUT%"=="" set "COMPAREOUT=.\compare_output"
+set COMPAREOUT=%COMPAREOUT:"=%
+
+echo.
+echo Erzeuge A/B-Vergleich ...
+echo %PYCMD% -m spatial_analyzer compare "%BEFOREDIR%" "%AFTERDIR%" "%COMPAREOUT%"
+echo.
+%PYCMD% -m spatial_analyzer compare "%BEFOREDIR%" "%AFTERDIR%" "%COMPAREOUT%"
+echo.
+echo Fertig. Vergleichsbericht liegt in: %COMPAREOUT%
+echo.
+pause
+goto menu
+
 :help
 echo.
 %PYCMD% -m spatial_analyzer analyze --help
+echo.
+%PYCMD% -m spatial_analyzer compare --help
 echo.
 pause
 goto menu
