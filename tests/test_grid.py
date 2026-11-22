@@ -35,6 +35,33 @@ class TestR160Grid:
         with pytest.raises(ValueError):
             r160_grid(100.001, 101.0)
 
+    @pytest.mark.parametrize(
+        "start_hz,end_hz",
+        [
+            (float("nan"), 100.0),
+            (20.0, float("nan")),
+            (float("inf"), 100.0),
+            (20.0, float("inf")),
+        ],
+    )
+    def test_rejects_nan_and_inf_bounds_with_clear_error(self, start_hz, end_hz):
+        # Haertung (Prioritaet 5): vor dem Fix schlug nan als start_hz/end_hz
+        # NICHT am "<= 0"-Check an (float('nan') <= 0 ist False) und
+        # brach erst spaeter mit einem unklaren rohen
+        # "cannot convert float NaN to integer" ab.
+        with pytest.raises(ValueError):
+            r160_grid(start_hz, end_hz)
+
+
+class TestR160GridMalformedInputsDoNotCrashRaw:
+    """Stellt sicher, dass r160_grid() bei ungueltigen Eingaben konsistent
+    ValueError wirft statt mit einer anderen, unerwarteten Exception-Klasse
+    abzubrechen (z. B. TypeError aus numpy-internen Operationen)."""
+
+    def test_non_numeric_start_raises_value_or_type_error_not_silently(self):
+        with pytest.raises((ValueError, TypeError)):
+            r160_grid("abc", 100.0)  # type: ignore[arg-type]
+
 
 class TestInterpolateToGrid:
     def test_exact_match_at_source_points(self):
@@ -68,6 +95,54 @@ class TestInterpolateToGrid:
             interpolate_to_grid(
                 np.array([40.0, 20.0]), np.array([1.0, 2.0]), np.array([30.0])
             )
+
+    def test_rejects_duplicate_source_frequencies(self):
+        # Doppelte Frequenz = Steigung 0 = ebenfalls kein "streng monoton
+        # steigend", muss denselben Fehler wie eine echte Inversion werfen.
+        with pytest.raises(ValueError):
+            interpolate_to_grid(
+                np.array([20.0, 20.0, 100.0]), np.array([1.0, 2.0, 3.0]), np.array([30.0])
+            )
+
+    def test_rejects_empty_source_arrays(self):
+        # Vorher: numpy's eigener, unklarer Fehler "array of sample points
+        # is empty" statt einer verstaendlichen Validierungsmeldung.
+        with pytest.raises(ValueError):
+            interpolate_to_grid(np.array([]), np.array([]), np.array([30.0]))
+
+    @pytest.mark.parametrize(
+        "bad_source_freqs",
+        [
+            [20.0, float("nan"), 1000.0],
+            [20.0, float("inf"), 1000.0],
+        ],
+    )
+    def test_rejects_non_finite_source_freqs(self, bad_source_freqs):
+        # Haertung (Prioritaet 5): NaN/Inf im Quellraster schlug vorher
+        # NICHT bei der Monotonie-Pruefung an (np.diff([...nan...]) <= 0
+        # ist ueberall False) und floss stillschweigend in np.interp() ein -
+        # live reproduziert: Ergebnis enthielt NaN an Stellen, die eigentlich
+        # gueltige Interpolationspunkte gewesen waeren.
+        with pytest.raises(ValueError):
+            interpolate_to_grid(
+                np.array(bad_source_freqs), np.array([1.0, 2.0, 3.0]), np.array([30.0])
+            )
+
+    def test_rejects_non_finite_source_values(self):
+        with pytest.raises(ValueError):
+            interpolate_to_grid(
+                np.array([20.0, 100.0, 1000.0]),
+                np.array([1.0, float("nan"), 3.0]),
+                np.array([30.0]),
+            )
+
+    def test_single_source_point_still_works(self):
+        # Grenzfall, der schon vor der Haertung korrekt funktionierte:
+        # ein einzelner Quellpunkt ist gueltig (Interpolation an genau
+        # diesem Punkt, NaN sonst), soll weiterhin keinen Fehler werfen.
+        result = interpolate_to_grid(np.array([100.0]), np.array([60.0]), np.array([100.0, 200.0]))
+        assert result[0] == pytest.approx(60.0)
+        assert np.isnan(result[1])
 
     def test_interpolates_linearly_in_log_space(self):
         # Bei gleichem SPL-Wert an beiden Stuetzstellen muss jeder

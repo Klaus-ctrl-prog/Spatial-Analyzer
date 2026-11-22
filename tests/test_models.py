@@ -47,6 +47,17 @@ class TestFrequencyGrid:
         with pytest.raises(ValueError):
             FrequencyGrid(frequencies_hz=np.array([20.0]))
 
+    def test_rejects_nan_frequency(self):
+        # Haertung (Prioritaet 5): np.diff([...nan...]) <= 0 ist ueberall
+        # False (NaN-Vergleiche sind nie wahr) - ein NaN in frequencies_hz
+        # passierte die Monotonie-Pruefung vor dem Fix unbemerkt.
+        with pytest.raises(ValueError):
+            FrequencyGrid(frequencies_hz=np.array([20.0, float("nan"), 1000.0]))
+
+    def test_rejects_inf_frequency(self):
+        with pytest.raises(ValueError):
+            FrequencyGrid(frequencies_hz=np.array([20.0, float("inf"), 1000.0]))
+
     def test_overlap_with_disjoint_ranges_is_none(self):
         a = FrequencyGrid(frequencies_hz=np.array([20.0, 50.0]), valid_start_hz=20, valid_end_hz=50)
         b = FrequencyGrid(frequencies_hz=np.array([60.0, 90.0]), valid_start_hz=60, valid_end_hz=90)
@@ -67,6 +78,21 @@ class TestImpulseResponseData:
     def test_rejects_zero_interval(self):
         with pytest.raises(ValueError):
             ImpulseResponseData(samples=np.array([1.0, 0.0]), sample_interval_s=0.0)
+
+    def test_rejects_nan_interval(self):
+        # Haertung (Prioritaet 5): float('nan') <= 0 ist False, ein NaN
+        # sample_interval_s passierte den reinen "<= 0"-Check vor dem Fix
+        # unbemerkt.
+        with pytest.raises(ValueError):
+            ImpulseResponseData(samples=np.array([1.0, 0.0]), sample_interval_s=float("nan"))
+
+    def test_rejects_inf_interval(self):
+        with pytest.raises(ValueError):
+            ImpulseResponseData(samples=np.array([1.0, 0.0]), sample_interval_s=float("inf"))
+
+    def test_rejects_negative_interval(self):
+        with pytest.raises(ValueError):
+            ImpulseResponseData(samples=np.array([1.0, 0.0]), sample_interval_s=-1e-5)
 
     def test_is_sweep_true_for_multi_sample(self):
         ir = ImpulseResponseData(samples=np.array([0.0, 1.0, 0.0]), sample_interval_s=1e-5)
