@@ -10,8 +10,10 @@ Zwischenform, nicht auf echten Binaer-`.mdat`-Dateien:
   "positions": [
     {
       "id": "sofa_mitte",
+      "notes": "..." (optional, REW-Notes-Text fuer die ganze Position),
       "l": {"freq_hz": [...], "spl_db": [...], "phase_deg": [...] (optional),
-            "impulse_response": {"samples": [...], "sample_interval_s": ...} (optional)},
+            "impulse_response": {"samples": [...], "sample_interval_s": ...} (optional),
+            "notes": "..." (optional, REW-Notes-Text fuer diesen Kanal)},
       "r": {...gleiche Struktur...},
       "sub": {...optional, gleiche Struktur wie l/r...}
     },
@@ -22,6 +24,16 @@ Zwischenform, nicht auf echten Binaer-`.mdat`-Dateien:
 Mindestens eine Position mit `id` gleich "sofa_mitte" sollte vorhanden sein
 (Haupthoerplatz); andernfalls wird die erste Position als Referenz fuer die
 Abklinganalyse verwendet und das wird in den Berichts-Hinweisen vermerkt.
+
+Das optionale `notes`-Feld (pro Position und/oder pro Kanal `l`/`r`/`sub`)
+ist der vom Nutzer in REW hinterlegte Klartext, typischerweise die DSP-
+Einstellungen von Geraeten, die REW nicht automatisch auslesen kann (siehe
+docs/REW_NOTES_TEMPLATE.md). Es landet unveraendert in `Report.measurement_
+notes` bzw. im Berichtsabschnitt "Mess- & DSP-Notizen" - strikt getrennt
+von `Report.notes` (den intern von der Pipeline erzeugten System-/Warn-
+hinweisen). Fehlt `notes`, bleibt die jeweilige Position/der Kanal im
+Berichtsabschnitt unerwaehnt; bestehende Eingabedateien ohne dieses Feld
+funktionieren unveraendert weiter.
 """
 
 from __future__ import annotations
@@ -55,7 +67,7 @@ from spatial_analyzer.eq_solver import (
 from spatial_analyzer.exporters import export_kefplayer_json, export_rew_generic_eq_txt
 from spatial_analyzer.grid import interpolate_to_grid, r160_grid
 from spatial_analyzer.models import RoomModel
-from spatial_analyzer.reporting import Report, write_frequency_table_csv
+from spatial_analyzer.reporting import MeasurementNote, Report, write_frequency_table_csv
 from spatial_analyzer.sub_optimizer import optimize as optimize_sub
 from spatial_analyzer.target_curve import TargetCurveConfig, absolute_target_db
 
@@ -150,6 +162,42 @@ def _confirm_mode_candidates(
     return confirmations
 
 
+def _collect_measurement_notes(positions: list[dict[str, Any]]) -> list[MeasurementNote]:
+    """Liest das optionale `notes`-Feld pro Position und pro Kanal
+    (`l`/`r`/`sub`) aus der Eingabe-JSON ein - der vom Nutzer in REW
+    hinterlegte Klartext (z. B. DSP-Einstellungen, siehe
+    docs/REW_NOTES_TEMPLATE.md). Strikt getrennt von den intern von der
+    Pipeline erzeugten System-/Warnhinweisen (siehe `notes`-Liste in
+    `run_pipeline`).
+
+    Abwaertskompatibel: fehlt `notes` (Position oder Kanal), wird dafuer
+    kein Eintrag erzeugt - bestehende Eingabedateien ohne dieses Feld
+    funktionieren unveraendert weiter.
+    """
+    collected: list[MeasurementNote] = []
+    for position in positions:
+        position_id = str(position.get("id", "?"))
+
+        position_note = position.get("notes")
+        if isinstance(position_note, str) and position_note.strip():
+            collected.append(
+                MeasurementNote(position_id=position_id, channel=None, text=position_note.strip())
+            )
+
+        for channel_key in ("l", "r", "sub"):
+            channel = position.get(channel_key)
+            if not isinstance(channel, dict):
+                continue
+            channel_note = channel.get("notes")
+            if isinstance(channel_note, str) and channel_note.strip():
+                collected.append(
+                    MeasurementNote(
+                        position_id=position_id, channel=channel_key, text=channel_note.strip()
+                    )
+                )
+    return collected
+
+
 def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
     data = json.loads(Path(input_path).read_text(encoding="utf-8"))
     positions = data["positions"]
@@ -165,6 +213,7 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         room = RoomModel(length_m=room_dims[0], width_m=room_dims[1], height_m=room_dims[2])
 
     notes: list[str] = []
+    measurement_notes = _collect_measurement_notes(positions)
 
     l_data = _interpolate_channel_to_common_grid(positions, "l")
     r_data = _interpolate_channel_to_common_grid(positions, "r")
@@ -295,6 +344,7 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         sub_optimizer_result=sub_result,
         eq_proposals_l=eq_proposals_l,
         eq_proposals_r=eq_proposals_r,
+        measurement_notes=measurement_notes,
         notes=notes,
     )
 

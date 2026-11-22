@@ -128,3 +128,42 @@ class TestRunPipeline:
 
         assert report.sub_optimizer_result is None
         assert any("Keine vollstaendigen Sub-Messungen" in n for n in report.notes)
+
+    def test_reads_notes_per_position_and_channel(self, tmp_path):
+        positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+        positions[0]["notes"] = "KEF Highpass 90 Hz, Phasenkorrektur ein"
+        positions[0]["l"]["notes"] = "Saxx Phase 180 Grad, Subpegel -5 dB"
+        positions += [_synthetic_position(f"wander_{i}") for i in range(2)]
+        data = {"room_dimensions_m": [5.72, 3.72, 2.40], "positions": positions}
+        input_path = tmp_path / "input.json"
+        input_path.write_text(json.dumps(data), encoding="utf-8")
+
+        report = run_pipeline(input_path, tmp_path / "out")
+
+        position_level = [n for n in report.measurement_notes if n.channel is None]
+        channel_level = [n for n in report.measurement_notes if n.channel == "l"]
+        assert position_level and position_level[0].text == "KEF Highpass 90 Hz, Phasenkorrektur ein"
+        assert position_level[0].position_id == "sofa_mitte"
+        assert channel_level and channel_level[0].text == "Saxx Phase 180 Grad, Subpegel -5 dB"
+        # Streng getrennt von den System-Hinweisen:
+        assert "KEF Highpass 90 Hz, Phasenkorrektur ein" not in report.notes
+
+    def test_missing_notes_field_is_backward_compatible(self, tmp_path):
+        input_path = tmp_path / "input.json"
+        _write_synthetic_input(input_path)  # enthaelt kein "notes"-Feld
+
+        report = run_pipeline(input_path, tmp_path / "out")
+
+        assert report.measurement_notes == []
+
+    def test_blank_notes_field_is_ignored(self, tmp_path):
+        positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+        positions[0]["notes"] = "   "
+        positions += [_synthetic_position(f"wander_{i}") for i in range(2)]
+        data = {"room_dimensions_m": [5.72, 3.72, 2.40], "positions": positions}
+        input_path = tmp_path / "input.json"
+        input_path.write_text(json.dumps(data), encoding="utf-8")
+
+        report = run_pipeline(input_path, tmp_path / "out")
+
+        assert report.measurement_notes == []
