@@ -208,6 +208,164 @@ class TestNaNGuard:
         assert np.isfinite(result.best_score)
 
 
+def _run_at_weight(freq, h_lr, h_sub, target, target_weight, spatial_weight, **kwargs):
+    weights = ObjectiveWeights(target_weight=target_weight, spatial_weight=spatial_weight)
+    return optimize(freq, h_lr, h_sub, target, weights=weights, **kwargs)
+
+
+class TestObjectiveWeightSensitivity:
+    """Prioritaet 6 der Roadmap: systematische Sensitivitaetsanalyse der
+    Gewichtung zwischen Zielkurven-RMSE (`target_weight`) und raeumlicher
+    Streuung (`spatial_weight`) in `optimize()`.
+
+    Alle Szenarien hier sind deterministische, rein synthetische
+    Mehrpunkt-Testfaelle (konstruierte komplexe Uebertragungsfunktionen,
+    keine echten Mess- oder Fahrzeugdaten) - sie belegen, WIE empfindlich
+    die Zielfunktion auf die Gewichtung reagiert, nicht WELCHE Gewichtung
+    "richtig" ist. Die bestehende 70/30-Standardgewichtung
+    (`DEFAULT_TARGET_WEIGHT`/`DEFAULT_SPATIAL_WEIGHT` in sub_optimizer.py)
+    wird hier an keiner Stelle veraendert - nur zusaetzlich gegen 50/50,
+    60/40, 80/20 und 90/10 (teils weitere Randwerte) kontrastiert.
+    """
+
+    def test_identical_positions_is_weight_invariant_regime(self):
+        # Stabiles Regime: alle Positionen IDENTISCH -> die raeumliche
+        # Streuung (np.std ueber die Positionen) ist an JEDEM Gitterpunkt
+        # exakt 0. Der spatial_weight-Term wird dann ueberall mit 0
+        # multipliziert, egal wie hoch er ist - das gefundene Optimum
+        # (gain, delay, polarity) darf sich deshalb bei KEINER Gewichtung
+        # aendern, nur der absolute Score-Wert aendert sich (er wird
+        # kleiner, je mehr Gewicht auf den stets-null Streuungsterm faellt).
+        freq = np.linspace(50.0, 120.0, 30)
+        h_lr = np.tile(_constant_complex(70.0, freq.size, 0.0), (3, 1))
+        h_sub = np.tile(_constant_complex(68.0, freq.size, 15.0), (3, 1))
+        target = np.full(freq.size, 72.0)
+        common_kwargs = dict(
+            band_hz=(50.0, 120.0),
+            gain_range_db=(-6.0, 6.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, 10.0), delay_step_ms=0.5,
+            polarities_deg=(0.0, 180.0),
+        )
+        weight_pairs = [(0.9, 0.1), (0.8, 0.2), (0.7, 0.3), (0.6, 0.4), (0.5, 0.5)]
+        results = [
+            _run_at_weight(freq, h_lr, h_sub, target, tw, sw, **common_kwargs)
+            for tw, sw in weight_pairs
+        ]
+        gains = {r.best_gain_db for r in results}
+        delays = {r.best_delay_ms for r in results}
+        polarities = {r.best_polarity_deg for r in results}
+        assert len(gains) == 1, f"Gain sollte in diesem Regime weight-invariant sein, war {gains}"
+        assert len(delays) == 1, f"Delay sollte in diesem Regime weight-invariant sein, war {delays}"
+        assert len(polarities) == 1
+        # Die Scores selbst duerfen sich trotzdem unterscheiden (kleineres
+        # spatial_weight -> kleinerer Gesamt-Score, da der Streuungsterm
+        # stets 0 ist und nur der RMSE-Anteil variabel gewichtet wird).
+        scores = [r.best_score for r in results]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_phase_spread_scenario_shifts_delay_candidate_away_from_default(self):
+        # Empfindliches Regime: H_LR identisch je Position, H_Sub mit
+        # unterschiedlicher PHASE pro Position (modelliert eine modale
+        # Variation der Sub-Ankopplung zwischen Positionen). Hier aendert
+        # sich der gewaehlte Delay-Kandidat zwischen einer staerker auf die
+        # Zielkurve fokussierten Gewichtung (90/10, 80/20: 0.5 ms) und einer
+        # staerker auf raeumliche Gleichmaessigkeit fokussierten Gewichtung
+        # (70/30 und darunter: 0.0 ms) - ein konkretes Beispiel fuer einen
+        # Regimewechsel bei einem anderen Delay-Kandidaten (kein
+        # Polaritaetswechsel in diesem Fall).
+        freq = np.linspace(50.0, 120.0, 30)
+        h_lr = np.tile(_constant_complex(70.0, freq.size, 0.0), (3, 1))
+        phases = [0.0, 60.0, -60.0]
+        h_sub = np.stack([_constant_complex(68.0, freq.size, ph) for ph in phases])
+        target = np.full(freq.size, 72.0)
+        common_kwargs = dict(
+            band_hz=(50.0, 120.0),
+            gain_range_db=(-6.0, 6.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, 10.0), delay_step_ms=0.5,
+            polarities_deg=(0.0, 180.0),
+        )
+
+        high_target_focus = _run_at_weight(freq, h_lr, h_sub, target, 0.9, 0.1, **common_kwargs)
+        default_weighting = _run_at_weight(freq, h_lr, h_sub, target, 0.7, 0.3, **common_kwargs)
+        more_spatial_focus = _run_at_weight(freq, h_lr, h_sub, target, 0.5, 0.5, **common_kwargs)
+
+        assert high_target_focus.best_delay_ms == pytest.approx(0.5)
+        assert default_weighting.best_delay_ms == pytest.approx(0.0)
+        assert more_spatial_focus.best_delay_ms == pytest.approx(0.0)
+        # Polaritaet und Gain bleiben in diesem Szenario robust, nur das
+        # Delay-Regime kippt - dokumentiert, dass eine Gewichtungsaenderung
+        # nicht zwangslaeufig ALLE drei Parameter gleichzeitig verschiebt.
+        assert high_target_focus.best_polarity_deg == default_weighting.best_polarity_deg
+        assert high_target_focus.best_gain_db == default_weighting.best_gain_db
+
+    def test_asymmetric_levels_scenario_has_stable_plateau_around_default_weighting(self):
+        # Staerkerer Interessenkonflikt: unterschiedliche PEGEL UND Phasen
+        # je Position. Zeigt ein konkretes Beispiel, in dem die
+        # Standard-Gewichtung (70/30) in der Mitte eines breiten stabilen
+        # Plateaus liegt (0.9/0.1 bis 0.5/0.5 liefern alle denselben
+        # Delay-Kandidaten), waehrend an den Raendern des untersuchten
+        # Bereichs (0.95/0.05 bzw. 0.4/0.6 und darueber hinaus) das Optimum
+        # auf einen anderen Delay-Kandidaten kippt. Das ist kein Beleg
+        # dafuer, dass 70/30 "richtig" ist, sondern nur dafuer, dass 70/30
+        # in diesem konkreten Szenario nicht unmittelbar an einer
+        # Kipp-Schwelle liegt.
+        freq = np.linspace(50.0, 120.0, 30)
+        h_lr = np.tile(_constant_complex(70.0, freq.size, 0.0), (4, 1))
+        phases = [0.0, 40.0, -40.0, 90.0]
+        levels = [68.0, 66.0, 70.0, 64.0]
+        h_sub = np.stack(
+            [_constant_complex(lv, freq.size, ph) for lv, ph in zip(levels, phases)]
+        )
+        target = np.full(freq.size, 73.0)
+        common_kwargs = dict(
+            band_hz=(50.0, 120.0),
+            gain_range_db=(-6.0, 6.0), gain_step_db=0.5,
+            delay_range_ms=(0.0, 10.0), delay_step_ms=0.25,
+            polarities_deg=(0.0, 180.0),
+        )
+
+        plateau_weight_pairs = [(0.9, 0.1), (0.8, 0.2), (0.7, 0.3), (0.6, 0.4), (0.5, 0.5)]
+        plateau_results = [
+            _run_at_weight(freq, h_lr, h_sub, target, tw, sw, **common_kwargs)
+            for tw, sw in plateau_weight_pairs
+        ]
+        plateau_delays = {r.best_delay_ms for r in plateau_results}
+        assert plateau_delays == {1.0}, (
+            f"Erwartetes stabiles Plateau 0.9/0.1 bis 0.5/0.5 bei 1.0 ms, war {plateau_delays}"
+        )
+
+        beyond_plateau = _run_at_weight(freq, h_lr, h_sub, target, 0.95, 0.05, **common_kwargs)
+        past_plateau = _run_at_weight(freq, h_lr, h_sub, target, 0.4, 0.6, **common_kwargs)
+        assert beyond_plateau.best_delay_ms == pytest.approx(0.75)
+        assert past_plateau.best_delay_ms == pytest.approx(1.25)
+        assert beyond_plateau.best_delay_ms != 1.0
+        assert past_plateau.best_delay_ms != 1.0
+
+    def test_sensitivity_runs_are_deterministic_and_reproducible(self):
+        # Grundvoraussetzung fuer jede Sensitivitaetsaussage: optimize() ist
+        # eine reine Grid-Search ohne Zufallskomponente - derselbe Lauf mit
+        # denselben Eingaben und derselben Gewichtung muss bitweise
+        # identisch reproduzierbar sein.
+        freq = np.linspace(50.0, 120.0, 30)
+        h_lr = np.tile(_constant_complex(70.0, freq.size, 0.0), (3, 1))
+        phases = [0.0, 60.0, -60.0]
+        h_sub = np.stack([_constant_complex(68.0, freq.size, ph) for ph in phases])
+        target = np.full(freq.size, 72.0)
+        common_kwargs = dict(
+            band_hz=(50.0, 120.0),
+            gain_range_db=(-6.0, 6.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, 10.0), delay_step_ms=0.5,
+            polarities_deg=(0.0, 180.0),
+        )
+        r1 = _run_at_weight(freq, h_lr, h_sub, target, 0.7, 0.3, **common_kwargs)
+        r2 = _run_at_weight(freq, h_lr, h_sub, target, 0.7, 0.3, **common_kwargs)
+        assert r1.best_gain_db == r2.best_gain_db
+        assert r1.best_delay_ms == r2.best_delay_ms
+        assert r1.best_polarity_deg == r2.best_polarity_deg
+        assert r1.best_score == r2.best_score
+        np.testing.assert_array_equal(r1.score_grid, r2.score_grid)
+
+
 class TestNarrowBandDelayAmbiguity:
     """Prioritaet 2, Punkt 3: 360-Grad-Periodizitaet bei schmalen Baendern
     (siehe Docstring-Hinweis in optimize()). Dokumentiert die numerische

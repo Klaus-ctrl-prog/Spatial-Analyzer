@@ -188,16 +188,34 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22.
    Funktionen/Methoden; `mdat.py` bleibt wie dokumentiert unabhaengig von
    `pipeline.py`.
 
-## Prioritaet 6 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
+## Prioritaet 6 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (teilweise umgesetzt)
 
-- `sub_optimizer.py` und `eq_solver.py`: dokumentierte Sensitivitaetstests
-  (wie stark aendert sich das Optimum bei kleinen Aenderungen der
-  Modell-Gewichtung `ObjectiveWeights`?), um die bereits als Modell
-  gekennzeichnete 70/30-Gewichtung nicht unbeabsichtigt als robuster
-  erscheinen zu lassen, als sie ist.
-- Pruefen, ob `validate_no_harm()` (Do-No-Harm-Check) auch fuer den
-  Mehrpositions-Fall mit sehr wenigen Positionen (z. B. nur 2) noch
-  aussagekraeftige Streuungskennzahlen liefert.
+**Teil 1 (umgesetzt per PR, siehe Commit-Historie ab 2026-11-22):**
+`sub_optimizer.py`: systematische, deterministische Sensitivitaetsanalyse der
+70/30-Gewichtung (`ObjectiveWeights`) anhand mehrerer synthetischer
+Mehrpunkt-Szenarien (Phasen-/Pegelstreuung zwischen Positionen) gegen 50/50,
+60/40, 70/30, 80/20 und 90/10 (teils weitere Randwerte). Ergebnisse (siehe
+`tests/test_sub_optimizer.py` `TestObjectiveWeightSensitivity` und
+Docstring-Ergaenzung in `sub_optimizer.py`):
+
+- **Stabiles Regime:** bei identischen Positionen (keine raeumliche
+  Streuung) ist das Ergebnis exakt gewichtungsinvariant - der
+  Streuungsterm ist ueberall 0.
+- **Empfindliches Regime:** bei spuerbarer Phasen-/Pegelstreuung zwischen
+  Positionen kann bereits eine Verschiebung von z. B. 80/20 auf 70/30
+  einen anderen Delay-Kandidaten liefern. In einem Szenario liegt die
+  Standardgewichtung 70/30 in der Mitte eines bis 50/50 stabilen
+  Plateaus; direkt daneben (95/5 bzw. 40/60) kippt das Optimum auf einen
+  anderen Delay-Kandidaten.
+- Die 70/30-Standardgewichtung selbst wurde **nicht** veraendert; alle
+  Befunde sind reine algorithmische Verifikation an synthetischen Daten,
+  keine Aussage ueber reale Raum-/Fahrzeugdaten.
+
+**Teil 2 (weiterhin offen, nicht Teil dieser PR):** Pruefen, ob
+`validate_no_harm()` (Do-No-Harm-Check) auch fuer den Mehrpositions-Fall
+mit sehr wenigen Positionen (z. B. nur 2) noch aussagekraeftige
+Streuungskennzahlen liefert, sowie eine analoge Sensitivitaetsbetrachtung
+fuer `eq_solver.py`.
 
 ## Prioritaet 7 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
 
