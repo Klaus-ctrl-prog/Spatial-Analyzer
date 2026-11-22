@@ -21,6 +21,16 @@ arbeitet auf einer bereits dekodierten dict-Repraesentation (z. B. aus einem
 JSON-/Text-Export oder aus der REW-API) und implementiert die eigentliche
 fachliche Logik (Pflichtfelder, Versions-Fallback, AllocationBudget,
 Sweep-Erkennung).
+
+Architektur-Hinweis (Stand 2026-11-22, im Rahmen der Haertungsarbeit vor
+Fruehjahr 2027 geprueft): `MdatRecord`/`MdatParser` sind aktuell NICHT mit
+`pipeline.py` verdrahtet - die CLI/Pipeline liest eine eigene, einfachere
+JSON-Zwischenform direkt ein (siehe Modul-Docstring von `pipeline.py`), nicht
+den Weg ueber dieses Modul. `start_time_s` (REWs Zeitbezug, siehe
+`MdatImpulseResponse`) bleibt deshalb nach dem Parsen hier zwar erhalten,
+fliesst aber noch in keine nachgelagerte Berechnung ein. Das ist kein neuer
+Mangel dieser Haertungsarbeit, sondern ein bestehender, hier nur explizit
+benannter Architekturzustand.
 """
 
 from __future__ import annotations
@@ -103,8 +113,27 @@ class MdatFrequencyResponse:
 
 @dataclass
 class MdatImpulseResponse:
+    """Siehe `claude/secs_mdat_pruefbericht.md` Abschnitt 2 ("src/models.rs")
+    fuer die Referenz-Feldliste, an der sich dieser Nachbau orientiert:
+    `samples, sample_interval_s, start_time_s, measurement_delay_s,
+    spl_offset_db, peak_index`.
+
+    `start_time_s` ist REWs absoluter/relativer Zeitbezug einer Messung
+    (z. B. Sekunden seit Messstart oder Unix-Zeitstempel, je nach REW-
+    Version/Export - hier bewusst nicht weiter interpretiert, nur verlust-
+    frei durchgereicht). Er ist von `measurement_delay_s` (relative
+    Verzoegerung innerhalb der Impulsantwort selbst, z. B. aus Mikrofon-
+    abstand) zu unterscheiden - beide Felder haben unterschiedliche
+    Bedeutung und duerfen nicht verwechselt werden.
+
+    Default `None` (nicht `0.0`): fehlt das Feld in der Eingabe, ist das
+    nicht dasselbe wie ein Zeitstempel von exakt Null - `None` macht das
+    "fehlt" explizit abfragbar, statt einen Messwert vorzutaeuschen.
+    """
+
     samples: np.ndarray
     sample_interval_s: float
+    start_time_s: float | None = None
     measurement_delay_s: float = 0.0
     spl_offset_db: float = 0.0
     peak_index: int | None = None
@@ -298,9 +327,11 @@ class MdatParser:
             ) from exc
         budget.charge(samples.size, dtype_size_bytes=8)
         peak_index = raw.get("peak_index")
+        start_time_s = raw.get("start_time_s")
         return MdatImpulseResponse(
             samples=samples,
             sample_interval_s=sample_interval_s,
+            start_time_s=float(start_time_s) if start_time_s is not None else None,
             measurement_delay_s=float(raw.get("measurement_delay_s", 0.0)),
             spl_offset_db=float(raw.get("spl_offset_db", 0.0)),
             peak_index=int(peak_index) if peak_index is not None else None,

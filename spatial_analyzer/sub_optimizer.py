@@ -64,6 +64,20 @@ def _complex_sum(
     polarity_deg: float,
     freq_hz: np.ndarray,
 ) -> np.ndarray:
+    """Phasenrichtige Summe im Frequenzbereich.
+
+    Haertungshinweis (ab 2026-11-22 verifiziert, siehe test_sub_optimizer.py
+    `TestSubSampleDelayPrecision`): `delay_s` ist ein kontinuierlicher
+    Gleitkommawert, keine Sample-Index-Grosse - die Verzoegerung wird
+    ausschliesslich ueber den linearen Phasenterm `exp(-j*2*pi*f*delay_s)`
+    auf die bereits im Frequenzbereich vorliegende Uebertragungsfunktion
+    angewendet. Es findet an keiner Stelle eine Rundung auf ganze Samples
+    statt (kein `int(delay_s / sample_interval_s)`, kein Array-Verschieben)
+    - die Aufloesung ist dadurch ausschliesslich durch die Gleitkomma-
+    genauigkeit und die Schrittweite des Such-Grids (`delay_step_ms` in
+    `optimize()`) begrenzt, nicht durch die Sample-Periode der zugrunde-
+    liegenden Messung.
+    """
     polarity = 1.0 if np.isclose(polarity_deg % 360.0, 0.0) else -1.0
     gain_lin = 10.0 ** (gain_db / 20.0)
     delay_s = delay_ms / 1000.0

@@ -72,6 +72,18 @@ class TestImpulseResponseData:
         ir = ImpulseResponseData(samples=np.array([0.0, 1.0, 0.0]), sample_interval_s=1e-5)
         assert ir.is_sweep
 
+    def test_start_time_s_defaults_to_none_not_zero(self):
+        ir = ImpulseResponseData(samples=np.array([0.0, 1.0, 0.0]), sample_interval_s=1e-5)
+        assert ir.start_time_s is None
+
+    def test_start_time_s_is_preserved_when_given(self):
+        ir = ImpulseResponseData(
+            samples=np.array([0.0, 1.0, 0.0]),
+            sample_interval_s=1e-5,
+            start_time_s=1732273200.5,
+        )
+        assert ir.start_time_s == pytest.approx(1732273200.5)
+
 
 class TestMeasurement:
     def _make_measurement(self, ppo=None):

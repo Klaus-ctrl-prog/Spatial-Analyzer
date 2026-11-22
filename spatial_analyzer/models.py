@@ -134,10 +134,20 @@ class FrequencyGrid:
 
 @dataclass
 class ImpulseResponseData:
-    """Impulsantwort-Rohdaten (ungeglaettet), analog secs-mdat ImpulseResponse."""
+    """Impulsantwort-Rohdaten (ungeglaettet), analog secs-mdat ImpulseResponse
+    (siehe claude/secs_mdat_pruefbericht.md Abschnitt 2 fuer die Referenz-
+    Feldliste: samples, sample_interval_s, start_time_s, measurement_delay_s,
+    spl_offset_db, peak_index).
+
+    `start_time_s` ist REWs Zeitbezug der Messung, zu unterscheiden von
+    `measurement_delay_s` (relative Verzoegerung innerhalb der Impulsantwort
+    selbst). Default `None`, nicht `0.0` - fehlt das Feld, ist das nicht
+    dasselbe wie ein Zeitstempel von exakt Null.
+    """
 
     samples: np.ndarray
     sample_interval_s: float
+    start_time_s: float | None = None
     measurement_delay_s: float = 0.0
     spl_offset_db: float = 0.0
     peak_index: int | None = None
