@@ -127,13 +127,52 @@ def simulate_multi_position_preview(
     LR_nachher = H_L*L + H_R*R, kanalgetrennt VOR der Summation gefiltert -
     H*(L+R) ist nur der Spezialfall identischer Filter, hier nicht
     vorausgesetzt.
+
+    Haertungshinweis (Runde A, P0-Datenintegritaet): diese Funktion erhaelt
+    genau EIN `freq_hz`-Raster und EINE `position_ids`-Liste fuer BEIDE
+    Kanaele - sie geht also zwingend davon aus, dass `l_complex` und
+    `r_complex` bereits vom Aufrufer auf ein identisches Frequenzraster und
+    dieselbe Positionsreihenfolge gebracht wurden (siehe
+    `pipeline._build_joint_lr_data`). Was hier gepruefte werden KANN
+    (Formuebereinstimmung, endliche Werte) wird explizit und fail-closed
+    geprueft; die semantische Zuordnung "Zeile i von L ist dieselbe
+    Position wie Zeile i von R" kann diese Funktion aus den uebergebenen
+    Arrays allein nicht verifizieren - dafuer ist der Aufrufer zustaendig.
     """
     freq_hz = np.asarray(freq_hz, dtype=np.float64)
     l_complex = np.asarray(l_complex, dtype=np.complex128)
     r_complex = np.asarray(r_complex, dtype=np.complex128)
-    n_positions = l_complex.shape[0]
-    if r_complex.shape[0] != n_positions or len(position_ids) != n_positions:
-        raise ValueError("l_complex, r_complex und position_ids muessen gleich viele Positionen haben")
+
+    if l_complex.ndim != 2 or r_complex.ndim != 2:
+        raise ValueError(
+            f"l_complex (ndim={l_complex.ndim}) und r_complex (ndim={r_complex.ndim}) "
+            "muessen 2D sein: (n_positions, n_freqs)"
+        )
+    if l_complex.shape != r_complex.shape:
+        raise ValueError(
+            f"l_complex {l_complex.shape} und r_complex {r_complex.shape} muessen dieselbe "
+            "Form (n_positions, n_freqs) haben - L und R muessen vor diesem Aufruf auf ein "
+            "gemeinsames Frequenzraster und dieselbe Positionsreihenfolge gebracht werden "
+            "(siehe pipeline._build_joint_lr_data)"
+        )
+    n_positions, n_freqs = l_complex.shape
+    if len(position_ids) != n_positions:
+        raise ValueError(
+            f"position_ids (Laenge {len(position_ids)}) passt nicht zur Positionsanzahl "
+            f"von l_complex/r_complex ({n_positions})"
+        )
+    if freq_hz.shape != (n_freqs,):
+        raise ValueError(
+            f"freq_hz (Laenge {freq_hz.size}) passt nicht zur Frequenzachse von "
+            f"l_complex/r_complex (Laenge {n_freqs})"
+        )
+    if not np.all(np.isfinite(freq_hz)):
+        raise ValueError("freq_hz enthaelt NaN/Inf")
+    if not (np.all(np.isfinite(l_complex)) and np.all(np.isfinite(r_complex))):
+        raise ValueError(
+            "l_complex/r_complex enthalten NaN/Inf - die Vorschau wird fail-closed "
+            "abgebrochen statt stillschweigend mit unsinnigen Werten weiterzurechnen"
+        )
 
     h_l = response_complex(filters_l, fs, freq_hz)
     h_r = response_complex(filters_r, fs, freq_hz)
