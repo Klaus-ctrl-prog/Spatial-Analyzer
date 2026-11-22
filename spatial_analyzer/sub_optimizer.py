@@ -12,6 +12,35 @@ siehe Zwischenstand-Doku Abschnitt 11, Punkt 1):
 Das bekannte Modenband 60-62 Hz wird getrennt ausgewiesen, damit eine
 Verbesserung/Verschlechterung dort nicht als "Mode behoben" statt als
 Interferenzeffekt zwischen zwei Quellen fehlinterpretiert wird.
+
+Sensitivitaet der 70/30-Gewichtung (Prioritaet 6 der Roadmap, Stand
+2026-11-22, siehe tests/test_sub_optimizer.py `TestObjectiveWeightSensitivity`
+fuer die konkreten, deterministischen Mehrpunkt-Szenarien): die 70/30-
+Standardgewichtung selbst wird durch diese Haertungsrunde NICHT veraendert -
+untersucht wurde nur, wie empfindlich das gefundene Optimum (Gain/Delay/
+Polaritaet) auf eine Variation der Gewichtung reagiert, bei sonst gleichen
+synthetischen Eingaben:
+
+- Stabiles Regime: sind alle Positionen identisch (keine raeumliche
+  Streuung), ist das Ergebnis exakt gewichtungsinvariant - der
+  Streuungsterm ist ueberall 0 und wird dadurch unabhaengig von
+  `spatial_weight` neutral.
+- Empfindliches Regime: bei spuerbarer Streuung zwischen den Positionen
+  (unterschiedliche Phase und/oder Pegel der Sub-Ankopplung je Position)
+  kann bereits eine Verschiebung der Gewichtung zwischen z. B. 80/20 und
+  70/30 einen anderen Delay-Kandidaten liefern (haeufiger beobachtet als
+  ein Polaritaetswechsel bei den hier untersuchten Szenarien). In einem
+  der untersuchten Szenarien liegt die Standardgewichtung 70/30 in der
+  Mitte eines breiteren, bis 50/50 stabilen Plateaus; direkt daneben
+  (z. B. 95/5 oder 40/60) kippt das Optimum bereits auf einen anderen
+  Delay-Kandidaten. Das belegt nur, dass 70/30 in DIESEM synthetischen
+  Szenario nicht unmittelbar an einer Kipp-Schwelle liegt - keine
+  allgemeine Aussage ueber Stabilitaet bei echten Raum-/Fahrzeugdaten.
+
+Alle Befunde hierzu sind ausschliesslich algorithmische Verifikation an
+rein synthetischen, konstruierten Testfaellen - keine Aussage ueber ein
+reales Fahrzeug- oder Wohnzimmerverhalten, und kein Beleg dafuer, dass
+70/30 (oder eine andere Gewichtung) "richtig" ist.
 """
 
 from __future__ import annotations
@@ -31,7 +60,12 @@ DEFAULT_SPATIAL_WEIGHT = 0.3
 @dataclass(frozen=True)
 class ObjectiveWeights:
     """Bewusst gewaehlte Modell-Gewichtung (keine gemessene/abgeleitete
-    Zahl) - siehe Zwischenstand-Doku Abschnitt 11, Punkt 1."""
+    Zahl) - siehe Zwischenstand-Doku Abschnitt 11, Punkt 1.
+
+    Unveraendert als 70/30 (`DEFAULT_TARGET_WEIGHT`/`DEFAULT_SPATIAL_WEIGHT`)
+    belassen. Siehe Modul-Docstring und tests/test_sub_optimizer.py
+    `TestObjectiveWeightSensitivity` fuer die Sensitivitaetsanalyse dieser
+    Gewichtung gegenueber 50/50 bis 90/10 an synthetischen Szenarien."""
 
     target_weight: float = DEFAULT_TARGET_WEIGHT
     spatial_weight: float = DEFAULT_SPATIAL_WEIGHT
