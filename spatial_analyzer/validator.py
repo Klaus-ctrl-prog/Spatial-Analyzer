@@ -253,10 +253,17 @@ def validate_input(data: Any) -> list[ValidationIssue]:
             pos_id = f"<position {i}>"
         else:
             if pos_id in seen_ids:
+                # Haertung (Runde A, P0-Datenintegritaet): eine doppelte id
+                # ist kein harmloser Stilhinweis, sondern fuehrt in
+                # pipeline.py bei der id->Zeilenindex-Zuordnung (Subwoofer-
+                # Pfad) und beim L/R-Positionsabgleich (Do-No-Harm-
+                # Mehrpunktvorschau) zu stillschweigend falscher oder
+                # abgebrochener Zuordnung - deshalb "error", nicht "warning".
                 issues.append(
                     ValidationIssue(
-                        "warning", f"{prefix}.id",
-                        f"doppelte id {pos_id!r} (bereits bei positions[{seen_ids[pos_id]}])",
+                        "error", f"{prefix}.id",
+                        f"doppelte id {pos_id!r} (bereits bei positions[{seen_ids[pos_id]}]) - "
+                        "Positions-IDs muessen innerhalb einer Messsession eindeutig sein",
                     )
                 )
             seen_ids[pos_id] = i

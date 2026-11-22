@@ -114,3 +114,46 @@ class TestSimulateMultiPositionPreview:
         r_complex = np.ones((1, 2), dtype=np.complex128)
         with pytest.raises(ValueError):
             simulate_multi_position_preview(freq, ["a", "b"], l_complex, r_complex, [], [], fs=48000.0)
+
+    def test_rejects_mismatched_frequency_axis_lengths(self):
+        # L und R haben dieselbe Form, aber das uebergebene freq_hz passt
+        # nicht zur Spaltenzahl - z. B. wenn L und R versehentlich auf
+        # unterschiedliche Raster interpoliert wurden (siehe pipeline.py
+        # Haertung Runde A, P0-Datenintegritaet).
+        freq = np.array([50.0, 100.0, 150.0])  # 3 Werte
+        l_complex = np.ones((2, 2), dtype=np.complex128)  # nur 2 Frequenzen
+        r_complex = np.ones((2, 2), dtype=np.complex128)
+        with pytest.raises(ValueError):
+            simulate_multi_position_preview(freq, ["a", "b"], l_complex, r_complex, [], [], fs=48000.0)
+
+    def test_rejects_mismatched_l_r_shapes_even_with_same_position_count(self):
+        freq_l_shape = np.array([50.0, 100.0])
+        l_complex = np.ones((2, 2), dtype=np.complex128)
+        r_complex = np.ones((2, 3), dtype=np.complex128)  # andere Frequenzachse als L
+        with pytest.raises(ValueError):
+            simulate_multi_position_preview(
+                freq_l_shape, ["a", "b"], l_complex, r_complex, [], [], fs=48000.0
+            )
+
+    def test_rejects_non_finite_l_complex(self):
+        freq = np.array([50.0, 100.0])
+        l_complex = np.array([[1.0 + 0j, np.nan + 0j]])
+        r_complex = np.ones((1, 2), dtype=np.complex128)
+        with pytest.raises(ValueError):
+            simulate_multi_position_preview(freq, ["a"], l_complex, r_complex, [], [], fs=48000.0)
+
+    def test_rejects_non_finite_freq_hz(self):
+        freq = np.array([50.0, np.inf])
+        l_complex = np.ones((1, 2), dtype=np.complex128)
+        r_complex = np.ones((1, 2), dtype=np.complex128)
+        with pytest.raises(ValueError):
+            simulate_multi_position_preview(freq, ["a"], l_complex, r_complex, [], [], fs=48000.0)
+
+    def test_rejects_1d_complex_arrays(self):
+        # Eine haeufige Fehlbenutzung: ein einzelner Positionsvektor ohne
+        # die vorgeschriebene (n_positions, n_freqs)-Form.
+        freq = np.array([50.0, 100.0])
+        l_complex = np.ones(2, dtype=np.complex128)
+        r_complex = np.ones(2, dtype=np.complex128)
+        with pytest.raises(ValueError):
+            simulate_multi_position_preview(freq, ["a"], l_complex, r_complex, [], [], fs=48000.0)

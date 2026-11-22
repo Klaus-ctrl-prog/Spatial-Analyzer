@@ -60,6 +60,15 @@ class TestValidateInputStructuralErrors:
         issues = validate_input({"positions": positions})
         assert any("Kanal l" in i.message for i in issues if i.severity == "error")
 
+    def test_duplicate_id_is_error(self):
+        positions = _good_positions(n_wander=2)
+        positions[2]["id"] = positions[0]["id"]
+        issues = validate_input({"positions": positions})
+        assert has_errors(issues)
+        assert any(
+            "doppelte id" in i.message and i.severity == "error" for i in issues
+        )
+
     def test_mismatched_freq_spl_length_is_error(self):
         entry = _good_entry()
         entry["spl_db"] = entry["spl_db"][:-5]
@@ -263,16 +272,13 @@ class TestValidateInputWarnings:
         issues = validate_input({"positions": _good_positions(n_wander=1)})
         assert any("Position(en)" in i.message for i in issues if i.severity == "warning")
 
-    def test_duplicate_id_is_warning(self):
-        positions = _good_positions(n_wander=2)
-        positions[2]["id"] = positions[0]["id"]
-        issues = validate_input({"positions": positions})
-        assert any("doppelte id" in i.message for i in issues)
-
     def test_implausible_spl_value_is_warning(self):
         entry = _good_entry()
         entry["spl_db"][0] = 500.0  # offensichtlicher Tippfehler
-        positions = [{"id": "sofa_mitte", "l": entry, "r": _good_entry()}]
+        # Eigene, von _good_positions()'s "sofa_mitte" verschiedene id, damit
+        # dieser Test nicht versehentlich eine doppelte id erzeugt (seit
+        # Runde A ein "error", siehe test_duplicate_id_is_error).
+        positions = [{"id": "spl_outlier_check", "l": entry, "r": _good_entry()}]
         positions += _good_positions(n_wander=3)
         issues = validate_input({"positions": positions})
         assert not has_errors(issues)

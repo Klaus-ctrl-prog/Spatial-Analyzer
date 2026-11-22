@@ -80,7 +80,73 @@ class ChannelData:
     position_ids: list[str]
     freq_hz: np.ndarray  # gemeinsames R160-Raster
     spl_db: np.ndarray  # (n_positions, n_freqs)
+    # Phasenvertrag (siehe `_unwrap_phase_deg`): falls nicht None, sind die
+    # Werte KONTINUIERLICH entpackt (nicht auf [-180, 180] Grad zurueck-
+    # gefaltet). Fuer `complex_response.to_complex()` unschaedlich
+    # (exp(1j*phase_rad) ist periodisch); ein direkter Vergleich/eine
+    # direkte Anzeige von `phase_deg`-Werten muss das beruecksichtigen.
     phase_deg: np.ndarray | None  # (n_positions, n_freqs) oder None
+
+
+@dataclass
+class JointLRData:
+    """Gemeinsames L/R-Datenpaket fuer die L+R-Summenanalyse (aktuell:
+    Do-No-Harm-Mehrpunktvorschau, siehe `_build_joint_lr_data`).
+
+    Im Unterschied zu zwei unabhaengig per `_interpolate_channel_to_common_
+    grid()` aufgebauten `ChannelData`-Objekten (die je Kanal ihr eigenes
+    Frequenzraster UND ihre eigene, kanalspezifische Positionsliste haben
+    koennen) gilt hier zwingend: `freq_hz` ist fuer L und R IDENTISCH, und
+    `position_ids` beschreibt fuer beide Kanaele dieselbe Position in
+    derselben Zeile (l_spl_db[i]/l_phase_deg[i] und r_spl_db[i]/
+    r_phase_deg[i] gehoeren zur selben Position `position_ids[i]`)."""
+
+    position_ids: list[str]
+    freq_hz: np.ndarray
+    l_spl_db: np.ndarray
+    l_phase_deg: np.ndarray
+    r_spl_db: np.ndarray
+    r_phase_deg: np.ndarray
+
+
+def _unwrap_phase_deg(phase_deg: Any) -> np.ndarray:
+    """Phasenvertrag dieses Moduls: JEDE Phase (Grad) wird VOR einer
+    Interpolation auf ein Zielraster per `np.unwrap` entpackt.
+
+    Hintergrund: `interpolate_to_grid()` interpoliert linear im log10(f)-
+    Raum - ohne Entpacken wuerde ein echter Sprung wie +179 Grad ->
+    (tatsaechlich weiter gedreht) +181 Grad, der als -179 Grad abgelegt ist,
+    als rechnerischer Sprung von ~358 Grad interpretiert und faelschlich zu
+    einem Interpolationswert nahe 0 Grad fuehren, statt nahe ±180 Grad.
+
+    Das Ergebnis ist danach KONTINUIERLICH (nicht mehr auf [-180, 180] Grad
+    zurueckgefaltet) - das ist beabsichtigt und fuer
+    `complex_response.to_complex()` unschaedlich, da exp(1j*phase_rad)
+    periodisch ist."""
+    phase_deg = np.asarray(phase_deg, dtype=np.float64)
+    return np.rad2deg(np.unwrap(np.deg2rad(phase_deg)))
+
+
+def _build_id_index_map(position_ids: list[str]) -> dict[str, int]:
+    """Baut eine eindeutige id->Zeilenindex-Abbildung.
+
+    Haertung (Runde A, P0-Datenintegritaet): `position_ids.index(pid)`
+    liefert bei doppelten IDs immer nur den ERSTEN Treffer und wuerde einen
+    doppelten Messpunkt stillschweigend ignorieren, statt den Fehler
+    sichtbar zu machen - insbesondere, wenn `run_pipeline()` ohne
+    vorherige `validate_input()`-Pruefung aufgerufen wird. Diese Funktion
+    baut die Zuordnung daher explizit auf und bricht fail-closed mit einer
+    klaren `ValueError` ab, statt eine doppelte ID stillschweigend zu
+    ueberschreiben."""
+    index_map: dict[str, int] = {}
+    for i, pid in enumerate(position_ids):
+        if pid in index_map:
+            raise ValueError(
+                f"doppelte Positions-ID {pid!r} (Zeilen {index_map[pid]} und {i}) - "
+                "IDs muessen je Kanal eindeutig sein (siehe validator.py)"
+            )
+        index_map[pid] = i
+    return index_map
 
 
 def _interpolate_channel_to_common_grid(
@@ -106,11 +172,96 @@ def _interpolate_channel_to_common_grid(
         spl = np.asarray(entry["spl_db"], dtype=np.float64)
         spl_matrix[i, :] = interpolate_to_grid(freq, spl, target_grid)
         if has_phase:
-            phase = np.asarray(entry["phase_deg"], dtype=np.float64)
-            phase_matrix[i, :] = interpolate_to_grid(freq, phase, target_grid)
+            phase_unwrapped = _unwrap_phase_deg(entry["phase_deg"])
+            phase_matrix[i, :] = interpolate_to_grid(freq, phase_unwrapped, target_grid)
 
     return ChannelData(
         position_ids=position_ids, freq_hz=target_grid, spl_db=spl_matrix, phase_deg=phase_matrix
+    )
+
+
+def _build_joint_lr_data(positions: list[dict[str, Any]]) -> JointLRData:
+    """Baut fuer die gemeinsame L/R-Summenanalyse (Do-No-Harm-
+    Mehrpunktvorschau) ein EINZIGES gemeinsames R160-Frequenzraster und
+    eine EINZIGE, fuer beide Kanaele identisch sortierte Positionsliste.
+
+    Haertungshintergrund (Runde A, P0-Datenintegritaet): L und R werden
+    fuer Mittelung/EQ-Vorschlaege bewusst UNABHAENGIG je Kanal interpoliert
+    (`_interpolate_channel_to_common_grid`) - je nachdem, welche Positionen
+    den jeweiligen Kanal ueberhaupt haben, koennen `ChannelData.freq_hz`
+    und `ChannelData.position_ids` fuer L und R in Laenge, Reihenfolge und
+    Frequenzbereich voneinander abweichen. Eine elementweise Kombination
+    (z. B. `l_complex[i] + r_complex[i]`) ueber zwei solche unabhaengigen
+    `ChannelData`-Objekte waere dann STILLSCHWEIGEND falsch: Zeile i in L
+    muss nicht Zeile i in R entsprechen, und Frequenz j in L muss nicht
+    Frequenz j in R entsprechen. Diese Funktion erzwingt stattdessen:
+
+    1) nur Positionen mit vollstaendigem L+R-Paar (Schnittmenge der IDs),
+    2) dieselbe (nach ID sortierte) Reihenfolge fuer beide Kanaele
+       (`l_ids == r_ids` ist dadurch strukturell garantiert, nicht nur
+       gepruefte Annahme),
+    3) ein gemeinsames R160-Raster als Schnittmenge der je Kanal gueltigen
+       Frequenzbereiche, auf das BEIDE Kanaele interpoliert werden.
+
+    Loest eine `ValueError` aus (statt ein leeres/unvollstaendiges
+    Ergebnis stillschweigend zurueckzugeben), wenn kein vollstaendiges
+    L+R-Paar existiert, doppelte IDs unter den Paaren auftreten, nicht an
+    allen Paaren eine Phase vorliegt, oder kein gemeinsamer Frequenzbereich
+    existiert (`r160_grid()`) - der Aufrufer (`run_pipeline`) faengt dies
+    ab und vermerkt den Grund als Hinweis statt die Pipeline abzubrechen."""
+    paired = [
+        p for p in positions
+        if isinstance(p.get("l"), dict) and isinstance(p.get("r"), dict)
+    ]
+    if not paired:
+        raise ValueError("keine Position mit vollstaendigem L+R-Paar gefunden")
+
+    ids = [p["id"] for p in paired]
+    if len(set(ids)) != len(ids):
+        raise ValueError(
+            "doppelte Positions-ID unter den vollstaendigen L+R-Paaren - "
+            "gemeinsame L/R-Analyse abgebrochen (siehe validator.py)"
+        )
+
+    # Dieselbe, nach ID sortierte Reihenfolge fuer L und R statt zwei
+    # unabhaengig aufgebauter Listen - garantiert l_ids == r_ids strukturell.
+    paired_sorted = sorted(paired, key=lambda p: p["id"])
+    sorted_ids = [p["id"] for p in paired_sorted]
+
+    if not all("phase_deg" in p["l"] and "phase_deg" in p["r"] for p in paired_sorted):
+        raise ValueError("nicht an allen vollstaendigen L+R-Positionspaaren ist eine Phase vorhanden")
+
+    l_entries = [p["l"] for p in paired_sorted]
+    r_entries = [p["r"] for p in paired_sorted]
+
+    starts = [min(e["freq_hz"]) for e in l_entries] + [min(e["freq_hz"]) for e in r_entries]
+    ends = [max(e["freq_hz"]) for e in l_entries] + [max(e["freq_hz"]) for e in r_entries]
+    common_start = max(starts)
+    common_end = min(ends)
+    target_grid = r160_grid(common_start, common_end)
+
+    n = len(paired_sorted)
+    l_spl = np.empty((n, target_grid.size), dtype=np.float64)
+    l_phase = np.empty((n, target_grid.size), dtype=np.float64)
+    r_spl = np.empty((n, target_grid.size), dtype=np.float64)
+    r_phase = np.empty((n, target_grid.size), dtype=np.float64)
+
+    for i, entry in enumerate(l_entries):
+        freq = np.asarray(entry["freq_hz"], dtype=np.float64)
+        l_spl[i, :] = interpolate_to_grid(freq, np.asarray(entry["spl_db"], dtype=np.float64), target_grid)
+        l_phase[i, :] = interpolate_to_grid(freq, _unwrap_phase_deg(entry["phase_deg"]), target_grid)
+    for i, entry in enumerate(r_entries):
+        freq = np.asarray(entry["freq_hz"], dtype=np.float64)
+        r_spl[i, :] = interpolate_to_grid(freq, np.asarray(entry["spl_db"], dtype=np.float64), target_grid)
+        r_phase[i, :] = interpolate_to_grid(freq, _unwrap_phase_deg(entry["phase_deg"]), target_grid)
+
+    return JointLRData(
+        position_ids=sorted_ids,
+        freq_hz=target_grid,
+        l_spl_db=l_spl,
+        l_phase_deg=l_phase,
+        r_spl_db=r_spl,
+        r_phase_deg=r_phase,
     )
 
 
@@ -262,11 +413,22 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
     filters_l = [p.filter for p in eq_proposals_l]
     filters_r = [p.filter for p in eq_proposals_r]
 
-    if l_data.phase_deg is not None and r_data.phase_deg is not None:
-        l_complex = to_complex(l_data.spl_db, l_data.phase_deg)
-        r_complex = to_complex(r_data.spl_db, r_data.phase_deg)
+    # Haertung (Runde A, P0-Datenintegritaet): die Do-No-Harm-Mehrpunkt-
+    # vorschau braucht L und R auf EINEM gemeinsamen Frequenzraster und in
+    # identischer Positionsreihenfolge (siehe `_build_joint_lr_data`) - die
+    # vormals hier verwendeten `l_data`/`r_data` sind je Kanal unabhaengig
+    # aufgebaut und duerfen dafuer NICHT direkt kombiniert werden.
+    try:
+        joint_lr = _build_joint_lr_data(positions)
+    except ValueError as exc:
+        joint_lr = None
+        notes.append(f"Do-No-Harm-Check uebersprungen: {exc}.")
+
+    if joint_lr is not None:
+        l_complex = to_complex(joint_lr.l_spl_db, joint_lr.l_phase_deg)
+        r_complex = to_complex(joint_lr.r_spl_db, joint_lr.r_phase_deg)
         is_safe, spread_before, spread_after = validate_no_harm(
-            l_data.freq_hz, l_data.position_ids, l_complex, r_complex, filters_l, filters_r
+            joint_lr.freq_hz, joint_lr.position_ids, l_complex, r_complex, filters_l, filters_r
         )
         if not is_safe:
             notes.append(
@@ -278,8 +440,6 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
                 f"Do-No-Harm-Check bestanden: raeumliche Streuung {spread_before:.2f} dB -> "
                 f"{spread_after:.2f} dB."
             )
-    else:
-        notes.append("Keine Phase fuer alle Positionen vorhanden - Do-No-Harm-Check uebersprungen.")
 
     sub_result = None
     has_sub_everywhere = all(p.get("sub") for p in positions)
@@ -295,25 +455,39 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
             # L/R (siehe grid.py) - L+R wird deshalb pro Position auf das
             # Sub-Raster interpoliert, nicht umgekehrt, da der Uebergangs-
             # bereich (50-120 Hz, siehe sub_optimizer.py) massgeblich ist.
+            #
+            # Haertung (Runde A, P0-Datenintegritaet): explizite, eindeutige
+            # id->Zeilenindex-Abbildungen statt `position_ids.index(pid)` -
+            # ein `.index()`-Aufruf liefert bei doppelten IDs immer nur den
+            # ERSTEN Treffer und wuerde das stillschweigend falsch machen.
             h_lr_rows = []
             h_sub_rows = []
             usable = True
-            for pid in sub_data.position_ids:
-                if pid not in l_data.position_ids or pid not in r_data.position_ids:
+            try:
+                l_index_map = _build_id_index_map(l_data.position_ids)
+                r_index_map = _build_id_index_map(r_data.position_ids)
+                sub_index_map = _build_id_index_map(sub_data.position_ids)
+            except ValueError as exc:
+                notes.append(f"Subwoofer-Optimierung uebersprungen: {exc}.")
+                l_index_map = r_index_map = sub_index_map = None
+                usable = False
+
+            for pid in sub_data.position_ids if usable else []:
+                if pid not in l_index_map or pid not in r_index_map:
                     notes.append(
                         f"Position '{pid}' hat Sub-, aber keine vollstaendigen L/R-Daten - "
                         "Subwoofer-Optimierung uebersprungen."
                     )
                     usable = False
                     break
-                li = l_data.position_ids.index(pid)
-                ri = r_data.position_ids.index(pid)
+                li = l_index_map[pid]
+                ri = r_index_map[pid]
                 l_spl_i = interpolate_to_grid(l_data.freq_hz, l_data.spl_db[li, :], sub_data.freq_hz)
                 l_phase_i = interpolate_to_grid(l_data.freq_hz, l_data.phase_deg[li, :], sub_data.freq_hz)
                 r_spl_i = interpolate_to_grid(r_data.freq_hz, r_data.spl_db[ri, :], sub_data.freq_hz)
                 r_phase_i = interpolate_to_grid(r_data.freq_hz, r_data.phase_deg[ri, :], sub_data.freq_hz)
                 h_lr_rows.append(to_complex(l_spl_i, l_phase_i) + to_complex(r_spl_i, r_phase_i))
-                si = sub_data.position_ids.index(pid)
+                si = sub_index_map[pid]
                 h_sub_rows.append(to_complex(sub_data.spl_db[si, :], sub_data.phase_deg[si, :]))
 
             if usable:
