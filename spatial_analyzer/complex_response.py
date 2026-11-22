@@ -15,6 +15,14 @@ def to_complex(spl_db: np.ndarray, phase_deg: np.ndarray) -> np.ndarray:
     """SPL (dB) + Phase (Grad) -> komplexe Uebertragungsfunktion.
 
     Amplitude (linear) = 10**(spl_db/20), Phase in Radiant.
+
+    Haertungshinweis (ab 2026-11-22 verifiziert, siehe test_complex_response.py
+    `TestAbsoluteLevelPreservation`): diese Umrechnung ist eine reine,
+    punktweise Formel ohne jede Normalisierung (kein Abzug eines Mittelwerts,
+    kein Bezug auf einen Referenzpegel). Die absolute SPL-Pegelbasis einer
+    Messung bleibt dadurch zwangslaeufig erhalten - jede Verschiebung des
+    Pegels muesste an anderer Stelle in der Rechenkette passieren (z. B.
+    durch eine bewusste Referenzierung wie in pipeline.py), nicht hier.
     """
     spl_db = np.asarray(spl_db, dtype=np.float64)
     phase_deg = np.asarray(phase_deg, dtype=np.float64)

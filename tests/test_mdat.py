@@ -99,6 +99,41 @@ class TestMdatParserSweepVsRta:
         assert record.is_sweep is False
 
 
+class TestMdatParserStartTime:
+    """Haertung (ab 2026-11-22): REWs Zeitbezug `start_time_s` darf beim
+    Parsen weder stillschweigend verschluckt noch mit 0.0 verwechselt
+    werden (siehe Modul-Docstring von mdat.py und
+    claude/secs_mdat_pruefbericht.md Abschnitt 2)."""
+
+    def test_start_time_s_is_preserved_when_present(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["start_time_s"] = 1732273200.5
+        record = MdatParser().parse_dict(data)
+        assert record.impulse_response is not None
+        assert record.impulse_response.start_time_s == pytest.approx(1732273200.5)
+
+    def test_start_time_s_is_none_not_zero_when_absent(self):
+        record = MdatParser().parse_dict(_base_sweep_dict())
+        assert record.impulse_response is not None
+        assert record.impulse_response.start_time_s is None
+
+    def test_start_time_s_of_exactly_zero_is_preserved_distinct_from_absent(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["start_time_s"] = 0.0
+        record = MdatParser().parse_dict(data)
+        assert record.impulse_response.start_time_s == 0.0
+        assert record.impulse_response.start_time_s is not None
+
+    def test_start_time_s_is_independent_of_measurement_delay_s(self):
+        data = _base_sweep_dict()
+        data["impulse_response"]["start_time_s"] = 1732273200.5
+        data["impulse_response"]["measurement_delay_s"] = 0.0123
+        record = MdatParser().parse_dict(data)
+        ir = record.impulse_response
+        assert ir.start_time_s == pytest.approx(1732273200.5)
+        assert ir.measurement_delay_s == pytest.approx(0.0123)
+
+
 class TestMdatParserRoomDimensions:
     def test_room_dimensions_parsed_with_confirmed_meaning(self):
         record = MdatParser().parse_dict(_base_sweep_dict())
