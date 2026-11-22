@@ -304,6 +304,72 @@ freizugebende Umsetzung:
   - Keine Freigabe eines Zahlenwerts in die Mosconi-Einstelltabelle (siehe
     Abschnitt 6), ohne dass eine reale Messung diesen Wert stuetzt.
 
+### Gate-Qualitaetspruefung (Leading-Edge Loss Guard, inspiriert von Resonalyze `GateLeadingEdgeLossDb`)
+
+Verifiziert ueber GitHub-Code-Suche (`gh api search/code`, Treffer in
+`dsp/DataHelper.Phase.cs`, `dsp/PhaseGatePlacement.cs`,
+`docs/tech/phase-and-group-delay.md`, `docs/tech/junction-phase-and-group-placement.md`,
+`source/Tools/VirtualCrossover/GatePlacementVerdict.cs`,
+`tests/Resonalyze.Dsp.Tests/FrequencyDependentPhaseTests.cs` - letzteres
+bestaetigt zugleich, dass `Resonalyze.Dsp.Tests` real existiert, was in
+Abschnitt 1.1 als offene Frage markiert war) sowie durch Lesen von
+`docs/tech/phase-and-group-delay.md`:
+
+- **Zweck:** Entscheidet, ob ein Zeitfenster ("Gate") auf eine Kurve
+  ueberhaupt gelegt werden darf, bevor deren Impulsantwort ausgewertet wird
+  - insbesondere relevant fuer Front-Sub und Sitz-Sub (hohe Gruppenlaufzeit,
+    Gate leicht zu fruh oder zu spaet gesetzt) und fuer die Tuer-MT (kurze,
+    aber durch Kabinereflexionen verschmierte Anstiegsflanke).
+- **Messgroesse:** Anteil der Energie **vor** dem Plateau-Beginn des Gates
+  gegenueber der im Gate verbleibenden Energie, in dB. Bewusst **nur die
+  Anstiegsflanke** ("leading edge"), nicht die Abklingflanke - das
+  Abschneiden des Ausklingens ist der eigentliche Zweck eines Gates und
+  wird nicht bestraft.
+- **Referenzwerte:** `-∞ dB` = kein Verlust; `0 dB` = so viel verworfen wie
+  behalten; `+∞ dB` = das Fenster enthaelt keinen Anteil des Kanals mehr
+  (vollstaendige Fehlplatzierung - absichtlich nicht als `-∞ dB`
+  kodiert, da sonst eine komplett daneben liegende Platzierung als die
+  "sicherste" erschiene).
+- **Zirkulaerer Vorlauf ("wrapped pre-roll"):** Die Berechnung liest Energie
+  mit der eigenen zyklischen Adressierung der Extraktion - eine Flanke, die
+  vor Beginn des Aufzeichnungsfensters beginnt, liest in den zyklischen
+  Schwanz hinein, in dem bei einer Transferfunktions-Impulsantwort der
+  Negativ-Zeit-Anteil liegt. Diesen Bereich als leer zu behandeln wuerde
+  "ein Fenster voller ungesehener Inhalte durchlassen" (sinngemaess aus der
+  Quelle). Fuer unsere eigene Umsetzung heisst das: bei kurzen FFT-Laengen
+  oder knapp gesetztem Pre-Trigger muss explizit geprueft werden, ob die
+  Gate-Vorlaufzeit in den zyklisch umgeschlagenen Bereich der Messung reicht,
+  statt diesen Bereich stillschweigend als Nullsignal zu interpretieren.
+- **Keine Wiederherstellung durch nachtraegliche Zeitverschiebung:** Laut
+  Quelle gilt ausdruecklich "a window is not a time shift" - eine
+  nachtraegliche Referenzierung auf einen gemeinsamen Zeitnullpunkt dreht
+  nur das Spektrum, kann aber bereits vom Gate abgeschnittene
+  Anstiegsenergie **nicht zurueckholen**. Fuer unsere Methodik (Abschnitt 4)
+  bedeutet das: ein zu knapp gesetztes Gate bei einer Einzelwegmessung ist
+  ein Messfehler, kein nachtraeglich im Rechenmodell korrigierbarer Fehler -
+  bei Verdacht auf Anschnitt muss die Messung wiederholt werden, nicht
+  rückwirkend verschoben.
+- **Nicht verifiziert, offen:** Ob `dsp/PhaseGatePlacement.cs` und
+  `source/Tools/VirtualCrossover/GatePlacementVerdict.cs` exakt diese Metrik
+  implementieren oder nur thematisch verwandte Bausteine sind, ist aus dem
+  gelesenen Dokument (`phase-and-group-delay.md`) nicht ablesbar - dort wird
+  stattdessen eine Funktion `ResolveGatePlacement` als die Stelle
+  beschrieben, an der ein Gate zu Samples wird (Extraktionsstart = ein
+  linkes Schulterstueck vor dem Gate-Offset, Plateaustart = der Offset,
+  Tukey-Fensterform ueber die Gate-Laenge). Der Quellcode dieser Dateien
+  wurde nicht gelesen (reine Doku-/Konzeptrecherche, kein Checkout).
+- **Geplante eigene Umsetzung (noch kein Code):** Eine vergleichbare,
+  eigenstaendig implementierte Pruefgroesse (Arbeitsname
+  `gate_leading_edge_loss_db()`) als Teil von `smart453_bass/` (Abschnitt 3),
+  die vor jeder Weg-Auswertung automatisch warnt, wenn eine Gate-Platzierung
+  relevante Anstiegsenergie verwirft - eigenstaendig nach der oeffentlich
+  beschriebenen Definition (dB-Verhaeltnis, zyklische Adressierung,
+  `+∞`/`-∞`-Randfaelle) neu geschrieben, nicht aus dem MIT-Quelltext
+  uebernommen.
+- **Integration erst nach Pruefung an synthetischen UND realen Messdaten**,
+  gemaess Abschnitt 5 - fruehestens ab Fruehjahr 2027, wenn echte
+  Einzelwegmessungen vorliegen.
+
 ---
 
 ## 6. Entwurf der spaeteren Mosconi-Einstelltabelle (Zielausgabe)
