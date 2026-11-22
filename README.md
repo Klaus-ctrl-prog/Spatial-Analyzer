@@ -27,12 +27,19 @@ Mehrwege-Summierung), Prioritaet 3 (Fazenda-Schwellenwert-Kalibrierung,
 schliesst GitHub-Issue #2), Prioritaet 4 (`mdat.py`-Parser-Haertung,
 bezieht sich auf Issue #7, schliesst es aber nicht), Prioritaet 5
 (Import-/Validierungspfad-Fuzzing), Prioritaet 6 Teil 1
-(Sensitivitaetsanalyse der Optimierer-Gewichtung). Prioritaet 6 Teil 2
-(`validate_no_harm()`-Grenzfall, `eq_solver.py`-Sensitivitaet) und
-Prioritaet 7 (Dokumentations-/Test-Konsistenz) folgen.
+(Sensitivitaetsanalyse der Optimierer-Gewichtung) und Prioritaet 7
+(Dokumentations-/Test-Konsistenz). Prioritaet 6 Teil 2 ist teilweise
+abgeschlossen: der `validate_no_harm()`-Grenzfall ist mit dem
+Drei-Stufen-Status `SAFE`/`UNSAFE`/`INCONCLUSIVE` geschlossen; offen
+(nicht blockierend) bleibt nur die Sensitivitaetsanalyse fuer
+`eq_solver.py`. Dazu kamen die Haertungsrunden A (PR #22: eindeutige
+Positions-IDs, gemeinsames L/R-Raster, Phasen-Unwrapping) und B (PR #23:
+Do-No-Harm-Statusmodell mit Kennzeichnung nicht freigegebener Exporte,
+optionale reale L+R-Summenmessung `lr`); die Testsuite umfasst 377 Tests
+(4 uebersprungen).
 
 Bewusst zurueckgestellt bis Fruehjahr 2027 (reale Messdaten
-erforderlich, siehe die offenen GitHub-Issues): `.mdat`-Binaerparser-
+erforderlich, offene GitHub-Issues #4, #5, #6 und #7): `.mdat`-Binaerparser-
 Validierung gegen eine echte REW-`.mdat`-Datei (`parse_bytes()` bleibt
 bewusst nicht implementiert, Issue #7), ETC-Reflexions-Schwellenwert-
 Kalibrierung anhand realer Wohnzimmer-Messungen (Issue #5),
