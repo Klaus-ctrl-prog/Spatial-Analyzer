@@ -143,3 +143,126 @@ class TestSubSampleDelayPrecision:
         # konstruktiv statt destruktiv - der Score darf nicht in die Naehe
         # des destruktiven Optimums aus dem vorigen Test kommen.
         assert result.best_score > 50.0
+
+
+class TestExactAnalyticConstructiveSum:
+    """Prioritaet 2, Punkt 1: exakte analytische Referenz fuer die
+    konstruktive Summe zweier phasengleicher, gleich starker Quellen
+    (+6.0206 dB, siehe auch test_lr_sum.py fuer dieselbe Referenz in
+    predict_complex_sum). Reine algorithmische Verifikation an
+    synthetischen Daten - keine Fahrzeug- oder Raumvalidierung.
+    """
+
+    def test_in_phase_equal_sources_score_is_near_zero_at_exact_target(self):
+        freq = np.linspace(50.0, 120.0, 20)
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        exact_constructive_db = 70.0 + 20.0 * np.log10(2.0)  # == 70 + 6.0206...
+        target = np.full(freq.size, exact_constructive_db)
+
+        result = optimize(
+            freq, h_lr, h_sub, target,
+            band_hz=(50.0, 120.0),
+            gain_range_db=(0.0, 0.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, 0.0), delay_step_ms=1.0,
+            polarities_deg=(0.0, 180.0),
+        )
+        assert result.best_polarity_deg == 0.0
+        # Score darf nur aus Gleitkomma-Rundung abweichen (dokumentierte
+        # Fehlergrenze), da target exakt dem analytischen Wert entspricht.
+        assert result.best_score == pytest.approx(0.0, abs=1e-9)
+
+
+class TestNaNGuard:
+    """Prioritaet 2, Punkt 2: ein NaN/Inf-Bin im Uebergangsband darf nicht
+    stillschweigend zu einem bedeutungslosen Default-Ergebnis fuehren
+    (siehe Docstring-Haertungshinweis in sub_optimizer.py `optimize()`)."""
+
+    def test_nan_in_h_sub_raises_instead_of_silent_default(self):
+        freq = np.linspace(50.0, 120.0, 10)
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(65.0, freq.size), (2, 1))
+        h_sub[0, 3] = np.nan + 0j  # z. B. aus einer Interpolation ausserhalb des Quellbereichs
+        target = np.full(freq.size, 74.0)
+        with pytest.raises(ValueError, match="NaN/Inf"):
+            optimize(freq, h_lr, h_sub, target, band_hz=(50.0, 120.0))
+
+    def test_nan_in_target_raises_instead_of_silent_default(self):
+        freq = np.linspace(50.0, 120.0, 10)
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(65.0, freq.size), (2, 1))
+        target = np.full(freq.size, 74.0)
+        target[0] = np.nan
+        with pytest.raises(ValueError, match="NaN/Inf"):
+            optimize(freq, h_lr, h_sub, target, band_hz=(50.0, 120.0))
+
+    def test_nan_outside_band_does_not_raise(self):
+        # NaN ausserhalb des gewaehlten Uebergangsbands ist unproblematisch -
+        # der Guard darf nicht ueberschiessend den gesamten Array pruefen.
+        freq = np.linspace(50.0, 130.0, 11)
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(65.0, freq.size), (2, 1))
+        h_sub[0, -1] = np.nan + 0j  # letzter Punkt bei 130 Hz, ausserhalb 50-120
+        target = np.full(freq.size, 74.0)
+        result = optimize(freq, h_lr, h_sub, target, band_hz=(50.0, 120.0))
+        assert np.isfinite(result.best_score)
+
+
+class TestNarrowBandDelayAmbiguity:
+    """Prioritaet 2, Punkt 3: 360-Grad-Periodizitaet bei schmalen Baendern
+    (siehe Docstring-Hinweis in optimize()). Dokumentiert die numerische
+    Fehlergrenze dieser Mehrdeutigkeit anhand des Modenbands um 61 Hz.
+    Reine algorithmische Verifikation - keine Fahrzeug- oder
+    Raumvalidierung.
+    """
+
+    def test_delays_separated_by_one_period_are_nearly_degenerate(self):
+        freq = np.linspace(60.9, 61.1, 5)  # sehr schmales Band um 61 Hz
+        f0 = 61.0
+        period_ms = 1000.0 / f0  # ~16.3934 ms
+
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        target = np.full(freq.size, 76.0)
+
+        result = optimize(
+            freq, h_lr, h_sub, target,
+            band_hz=(60.9, 61.1),
+            gain_range_db=(0.0, 0.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, period_ms * 2), delay_step_ms=period_ms,
+            polarities_deg=(0.0,),
+        )
+        scores = result.score_grid[0, 0, :]
+        # Scores bei 0, einer und zwei Perioden duerfen sich nur im Bereich
+        # von 1e-3 Score-Einheiten unterscheiden (dokumentierte Fehlergrenze
+        # fuer diese Bandbreite/Frequenz) - sie sind fast, aber bewusst
+        # nicht exakt, entartet.
+        assert np.max(scores) - np.min(scores) < 1e-3
+
+    def test_half_period_delay_is_clearly_worse_not_ambiguous(self):
+        # Gegenprobe: eine halbe Periode (destruktiv statt konstruktiv)
+        # muss sich klar (um Groessenordnungen) vom Score bei 0/einer
+        # vollen Periode unterscheiden - sonst waere der obige Test kein
+        # Beleg fuer echte (Fast-)Periodizitaet, sondern fuer eine
+        # degenerierte Zielfunktion, die ueberhaupt nicht unterscheidet.
+        freq = np.linspace(60.9, 61.1, 5)
+        f0 = 61.0
+        period_ms = 1000.0 / f0
+        half_period_ms = period_ms / 2.0
+
+        h_lr = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        h_sub = np.tile(_constant_complex(70.0, freq.size), (2, 1))
+        target = np.full(freq.size, 76.0)
+
+        result = optimize(
+            freq, h_lr, h_sub, target,
+            band_hz=(60.9, 61.1),
+            gain_range_db=(0.0, 0.0), gain_step_db=1.0,
+            delay_range_ms=(0.0, period_ms), delay_step_ms=half_period_ms,
+            polarities_deg=(0.0,),
+        )
+        scores = result.score_grid[0, 0, :]
+        score_at_zero = scores[0]
+        score_at_half_period = scores[1]
+        # Mindestens drei Groessenordnungen schlechter als bei 0/voller Periode.
+        assert score_at_half_period > 1000.0 * score_at_zero

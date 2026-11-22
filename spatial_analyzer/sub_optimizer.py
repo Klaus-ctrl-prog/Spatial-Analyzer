@@ -105,6 +105,24 @@ def optimize(
     Erzeugung aus SPL/Phase. `target_spl_db`: Zielkurve in dB, Form
     (n_freqs,) (siehe docs/SPECIFICATION.md Abschnitt 3.F - als Modell
     gekennzeichnet).
+
+    Bekannte, dokumentierte Grenze - 360-Grad-Periodizitaet bei schmalen
+    Baendern (verifiziert, siehe test_sub_optimizer.py
+    `TestNarrowBandDelayAmbiguity`): der Phasenterm `exp(-j*2*pi*f*tau)` ist
+    fuer eine EINZELNE Frequenz f periodisch in tau mit Periode 1/f. Fuer ein
+    schmales Band (z. B. `DEFAULT_MODE_BAND_HZ` = 60-62 Hz) sind Delays, die
+    sich um ein ganzzahliges Vielfaches von ~1/f_mitte unterscheiden (bei
+    61 Hz: ~16.39 ms), deshalb NAHEZU, aber nicht exakt, gleichwertig - die
+    Scores an solchen Kandidaten liegen typischerweise nur im Bereich von
+    1e-4 (Score-Einheiten) auseinander, waehrend ein eindeutig falscher
+    Delay (z. B. die halbe Periode) einen um Groessenordnungen schlechteren
+    Score ergibt. Diese Mehrdeutigkeit ist eine Eigenschaft der Zielfunktion
+    bei schmalen Baendern, kein Implementierungsfehler - `delay_range_ms`
+    sollte deshalb nicht pauschal weit ueber mehrere Perioden hinaus
+    gewaehlt werden, ohne diese Mehrdeutigkeit beim Interpretieren des
+    Ergebnisses zu beruecksichtigen. Alle hierzu gehoerenden Tests sind
+    ausschliesslich algorithmische Verifikation an synthetischen Daten,
+    keine Aussage ueber ein reales Fahrzeug- oder Wohnzimmerverhalten.
     """
     freq_hz = np.asarray(freq_hz, dtype=np.float64)
     h_lr_per_position = np.asarray(h_lr_per_position, dtype=np.complex128)
@@ -121,6 +139,30 @@ def optimize(
     if not np.any(band_mask):
         raise ValueError(f"Uebergangsband {band_hz} Hz liegt ausserhalb von freq_hz")
     mode_mask = band_mask & (freq_hz >= mode_band_hz[0]) & (freq_hz <= mode_band_hz[1])
+
+    # Haertung (ab 2026-11-22, Prioritaet 2 der Roadmap): np.mean()/np.std()
+    # unten propagieren NaN stillschweigend durch die GESAMTE Zielfunktion -
+    # ein einziger NaN-Bin (z. B. aus einer Interpolation ausserhalb des
+    # Quellbereichs, siehe grid.py) macht score_grid an jedem Gitterpunkt zu
+    # NaN. Da `NaN < best_score` immer False ist, wuerde `best` dann NIE
+    # aktualisiert und die Funktion liefert unbemerkt den Default
+    # (gain=0, delay=0, erste Polaritaet, score=inf) zurueck, als sei das
+    # ein echtes Optimierungsergebnis. Deshalb hier hart und fruehzeitig
+    # pruefen, statt das stillschweigend durchzureichen.
+    for name, arr in (
+        ("h_lr_per_position", h_lr_per_position[:, band_mask]),
+        ("h_sub_per_position", h_sub_per_position[:, band_mask]),
+        ("target_spl_db", target_spl_db[band_mask]),
+        ("freq_hz", freq_hz[band_mask]),
+    ):
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(
+                f"{name} enthaelt NaN/Inf innerhalb des Uebergangsbands {band_hz} Hz - "
+                "die Grid-Search wuerde sonst stillschweigend einen bedeutungslosen "
+                "Default (gain=0, delay=0, score=inf) statt eines echten Ergebnisses "
+                "liefern. Bitte vorher interpolieren/maskieren (siehe grid.py) oder "
+                "das Band so waehlen, dass es den betroffenen Bereich ausschliesst."
+            )
 
     gains = np.arange(gain_range_db[0], gain_range_db[1] + gain_step_db / 2, gain_step_db)
     delays = np.arange(delay_range_ms[0], delay_range_ms[1] + delay_step_ms / 2, delay_step_ms)
