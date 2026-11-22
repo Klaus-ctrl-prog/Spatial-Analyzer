@@ -31,6 +31,27 @@ den Weg ueber dieses Modul. `start_time_s` (REWs Zeitbezug, siehe
 fliesst aber noch in keine nachgelagerte Berechnung ein. Das ist kein neuer
 Mangel dieser Haertungsarbeit, sondern ein bestehender, hier nur explizit
 benannter Architekturzustand.
+
+Haertungsstand `parse_dict()` (Prioritaet 4, GitHub-Issue #7, Stand
+2026-11-22): zusaetzlich zu den bereits bestehenden Pflichtfeld-, Versions-
+und AllocationBudget-Pruefungen wurde abgesichert, dass fehlerhafte oder
+unvollstaendige Eingabestrukturen (falscher Typ statt dict, nicht-numerische
+Werte, laengen-inkonsistente Nebenarrays wie `phase_deg`, leere Mess-Arrays)
+durchgaengig als `MdatValidationError` erkannt werden, statt als roher,
+nicht abgefangener `TypeError`/`ValueError`/`AttributeError` durchzuschlagen.
+Das Speicherbudget (`AllocationBudget`) deckt jetzt auch die optionalen
+frequency_response-Nebenarrays einzeln ab. Siehe `tests/test_mdat.py`,
+Klassen `TestMdatParserMalformedStructures`, `TestMdatParserVersionEdgeCases`
+und `TestMdatParserAllocationBudgetEdgeCases`, fuer die konkreten,
+deterministischen Regressionsfaelle.
+
+Ausdrueckliche Leitplanke (Issue #7, unveraendert): `parse_bytes()` bleibt
+weiterhin bewusst NICHT implementiert. Diese Haertungsrunde haertet nur den
+bereits nutzbaren `parse_dict()`-Pfad gegen fehlerhafte dict-Strukturen -
+sie liefert KEINE Byte-Level-Verifikation gegen eine echte REW-.mdat-Datei
+und ist kein Ersatz fuer die in Issue #7 beschriebene Validierung, die
+fruehestens ab Maerz 2027 moeglich ist, wenn eine echte, unveraenderte
+.mdat-Datei vorliegt.
 """
 
 from __future__ import annotations
@@ -182,7 +203,12 @@ class MdatRecord:
             return True
         median_rest = float(np.median(rest))
         if median_rest <= 0:
-            return peak_value > 0
+            # Haertung (Prioritaet 4, Issue #7): ohne bool() liefert dieser
+            # Zweig einen numpy-Skalar (np.bool_) statt eines echten
+            # Python-bool - funktional identisch, aber `is False`-Vergleiche
+            # (z. B. in Tests) schlagen damit fehl. Konsistent mit dem
+            # anderen Return-Pfad unten gemacht.
+            return bool(peak_value > 0)
         return bool(peak_value >= 3.0 * median_rest)
 
 
@@ -262,21 +288,64 @@ class MdatParser:
             raise MdatValidationError(f"Pflichtfeld(er) fehlen: {', '.join(missing)}")
 
     @staticmethod
+    def _require_dict(raw: Any, field_label: str) -> dict[str, Any]:
+        """Haertung (Prioritaet 4, Issue #7): jeder verschachtelte Record
+        (`frequency_spacing`, `frequency_response`, `impulse_response`,
+        `room_dimensions`) muss selbst ein dict sein. Ohne diese Pruefung
+        wuerde z. B. eine Liste statt eines dicts erst beim ersten
+        `raw["key"]`-Zugriff mit einem rohen, nicht abgefangenen `TypeError`
+        abbrechen statt mit einer klaren `MdatValidationError`.
+        """
+        if not isinstance(raw, dict):
+            raise MdatValidationError(
+                f"{field_label} muss ein dict sein, erhalten: {type(raw).__name__}"
+            )
+        return raw
+
+    @staticmethod
+    def _to_float_or_none(value: Any, field_label: str) -> float | None:
+        """Einheitliche, fehlertolerante Zahlkonvertierung fuer optionale
+        Skalarfelder. Ohne dieses Hilfsmittel wuerden z. B. ein nicht-
+        numerischer `ppo`- oder `measurement_delay_s`-Wert einen rohen
+        `ValueError`/`TypeError` nach oben durchreichen statt eine klare,
+        auf das jeweilige Feld bezogene `MdatValidationError`."""
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise MdatValidationError(
+                f"{field_label} ist nicht in eine Zahl konvertierbar: {value!r}"
+            ) from exc
+
+    @staticmethod
+    def _to_int_or_none(value: Any, field_label: str) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise MdatValidationError(
+                f"{field_label} ist nicht in eine Ganzzahl konvertierbar: {value!r}"
+            ) from exc
+
+    @staticmethod
     def _parse_frequency_spacing(raw: dict[str, Any]) -> MdatFrequencySpacing:
+        raw = MdatParser._require_dict(raw, "frequency_spacing")
         try:
             start = float(raw["valid_start_hz"])
             end = float(raw["valid_end_hz"])
         except (KeyError, TypeError, ValueError) as exc:
             raise MdatValidationError(
-                "frequency_spacing braucht valid_start_hz und valid_end_hz"
+                "frequency_spacing braucht valid_start_hz und valid_end_hz als Zahlen"
             ) from exc
         if start >= end:
             raise MdatValidationError("valid_start_hz muss < valid_end_hz sein")
-        ppo = raw.get("ppo")
+        ppo = MdatParser._to_float_or_none(raw.get("ppo"), "frequency_spacing.ppo")
         return MdatFrequencySpacing(
             valid_start_hz=start,
             valid_end_hz=end,
-            ppo=float(ppo) if ppo is not None else None,
+            ppo=ppo,
         )
 
     @staticmethod
@@ -285,31 +354,56 @@ class MdatParser:
     ) -> MdatFrequencyResponse | None:
         if raw is None:
             return None
+        raw = MdatParser._require_dict(raw, "frequency_response")
         try:
             freq = np.asarray(raw["frequency_hz"], dtype=np.float64)
             spl = np.asarray(raw["spl_db"], dtype=np.float64)
-        except KeyError as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise MdatValidationError(
-                "frequency_response braucht frequency_hz und spl_db"
+                "frequency_response braucht frequency_hz und spl_db als numerische Arrays"
             ) from exc
+        if freq.size == 0 or spl.size == 0:
+            raise MdatValidationError(
+                "frequency_response.frequency_hz/spl_db duerfen nicht leer sein "
+                "(eine Messung ohne Datenpunkte ist keine gueltige frequency_response)"
+            )
         budget.charge(freq.size, dtype_size_bytes=8)
         budget.charge(spl.size, dtype_size_bytes=8)
         phase = raw.get("phase_deg")
         unwrapped = raw.get("unwrapped_phase_deg")
         group_delay = raw.get("group_delay_s")
-        for arr in (phase, unwrapped, group_delay):
-            if arr is not None:
-                budget.charge(len(arr), dtype_size_bytes=8)
+        parsed_optional: dict[str, np.ndarray | None] = {}
+        for label, arr in (
+            ("phase_deg", phase),
+            ("unwrapped_phase_deg", unwrapped),
+            ("group_delay_s", group_delay),
+        ):
+            if arr is None:
+                parsed_optional[label] = None
+                continue
+            try:
+                arr_np = np.asarray(arr, dtype=np.float64)
+                n_elements = len(arr_np) if arr_np.ndim > 0 else 1
+            except (TypeError, ValueError) as exc:
+                raise MdatValidationError(
+                    f"frequency_response.{label} ist kein numerisches Array: {arr!r}"
+                ) from exc
+            if arr_np.shape != freq.shape:
+                raise MdatValidationError(
+                    f"frequency_response.{label} hat Shape {arr_np.shape}, "
+                    f"muss aber zu frequency_hz passen (Shape {freq.shape}) - "
+                    "ein Laengenunterschied wuerde nachgelagerte punktweise "
+                    "Berechnungen (z. B. to_complex) stillschweigend auf "
+                    "falsche Frequenzpunkte beziehen."
+                )
+            budget.charge(n_elements, dtype_size_bytes=8)
+            parsed_optional[label] = arr_np
         return MdatFrequencyResponse(
             frequency_hz=freq,
             spl_db=spl,
-            phase_deg=np.asarray(phase, dtype=np.float64) if phase is not None else None,
-            unwrapped_phase_deg=(
-                np.asarray(unwrapped, dtype=np.float64) if unwrapped is not None else None
-            ),
-            group_delay_s=(
-                np.asarray(group_delay, dtype=np.float64) if group_delay is not None else None
-            ),
+            phase_deg=parsed_optional["phase_deg"],
+            unwrapped_phase_deg=parsed_optional["unwrapped_phase_deg"],
+            group_delay_s=parsed_optional["group_delay_s"],
         )
 
     @staticmethod
@@ -318,32 +412,52 @@ class MdatParser:
     ) -> MdatImpulseResponse | None:
         if raw is None:
             return None
+        raw = MdatParser._require_dict(raw, "impulse_response")
         try:
             samples = np.asarray(raw["samples"], dtype=np.float64)
             sample_interval_s = float(raw["sample_interval_s"])
         except (KeyError, TypeError, ValueError) as exc:
             raise MdatValidationError(
-                "impulse_response braucht samples und sample_interval_s"
+                "impulse_response braucht samples (numerisches Array) und "
+                "sample_interval_s (Zahl)"
             ) from exc
+        if samples.size == 0:
+            raise MdatValidationError(
+                "impulse_response.samples darf nicht leer sein (eine Impulsantwort "
+                "ohne Samples ist keine gueltige Messung)"
+            )
         budget.charge(samples.size, dtype_size_bytes=8)
-        peak_index = raw.get("peak_index")
-        start_time_s = raw.get("start_time_s")
+        peak_index = MdatParser._to_int_or_none(
+            raw.get("peak_index"), "impulse_response.peak_index"
+        )
+        start_time_s = MdatParser._to_float_or_none(
+            raw.get("start_time_s"), "impulse_response.start_time_s"
+        )
+        measurement_delay_s = MdatParser._to_float_or_none(
+            raw.get("measurement_delay_s", 0.0), "impulse_response.measurement_delay_s"
+        )
+        spl_offset_db = MdatParser._to_float_or_none(
+            raw.get("spl_offset_db", 0.0), "impulse_response.spl_offset_db"
+        )
         return MdatImpulseResponse(
             samples=samples,
             sample_interval_s=sample_interval_s,
-            start_time_s=float(start_time_s) if start_time_s is not None else None,
-            measurement_delay_s=float(raw.get("measurement_delay_s", 0.0)),
-            spl_offset_db=float(raw.get("spl_offset_db", 0.0)),
-            peak_index=int(peak_index) if peak_index is not None else None,
+            start_time_s=start_time_s,
+            measurement_delay_s=measurement_delay_s if measurement_delay_s is not None else 0.0,
+            spl_offset_db=spl_offset_db if spl_offset_db is not None else 0.0,
+            peak_index=peak_index,
         )
 
     @staticmethod
     def _parse_room_dimensions(raw: dict[str, Any] | None) -> MdatRoomDimensions | None:
         if raw is None:
             return None
+        raw = MdatParser._require_dict(raw, "room_dimensions")
         return MdatRoomDimensions(
-            length_m=raw.get("length_m"),
-            width_m=raw.get("width_m"),
-            height_m=raw.get("height_m"),
+            length_m=MdatParser._to_float_or_none(raw.get("length_m"), "room_dimensions.length_m"),
+            width_m=MdatParser._to_float_or_none(raw.get("width_m"), "room_dimensions.width_m"),
+            height_m=MdatParser._to_float_or_none(
+                raw.get("height_m"), "room_dimensions.height_m"
+            ),
             meaning=FieldMeaning.CONFIRMED,
         )

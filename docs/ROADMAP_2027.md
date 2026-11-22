@@ -116,7 +116,42 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Schliesst Issue #2.
    hoerbar/unhoerbar-Uebergang exakt an einem kalibrierten Stuetzpunkt
    (100 Hz / 0.27s: knapp darunter/exakt/knapp darueber).
 
-## Prioritaet 4 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
+## Prioritaet 4 - REW-MDAT-Parser Haertung (GitHub-Issue #7)
+
+Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Haertet den
+bestehenden `parse_dict()`-Pfad in `mdat.py`; schliesst NICHT Issue #7
+selbst (siehe Leitplanke unten).
+
+1. **`parse_dict()` gegen fehlerhafte/unvollstaendige Strukturen
+   abgesichert:** jeder verschachtelte Record (`frequency_spacing`,
+   `frequency_response`, `impulse_response`, `room_dimensions`) wird jetzt
+   explizit auf `dict`-Typ geprueft; nicht-numerische Werte (`ppo`,
+   `peak_index`, `measurement_delay_s`, `spl_offset_db`, `start_time_s`,
+   Raummasse) werden mit klarer `MdatValidationError` abgelehnt statt mit
+   rohem `TypeError`/`ValueError` durchzuschlagen; leere Mess-Arrays
+   (`frequency_hz`/`spl_db`/`samples`) werden abgelehnt; optionale
+   Nebenarrays (`phase_deg`, `unwrapped_phase_deg`, `group_delay_s`) werden
+   jetzt auf Laengengleichheit mit `frequency_hz` geprueft (vorher
+   stillschweigend akzeptierter Laengenunterschied, der nachgelagerte
+   punktweise Berechnungen falsch zugeordnet haette).
+2. **Speicherbudget, Versions-Fallback, Sweep/RTA-Erkennung geprueft:**
+   `AllocationBudget` deckt jetzt auch die optionalen
+   frequency_response-Nebenarrays einzeln ab. Versions-Fallback-Verhalten
+   fuer leere, unbekannte/zukuenftige und sehr alte Versionsstrings explizit
+   dokumentiert und getestet (Fallback greift nur bei fehlendem/leerem
+   Feld, nicht bei einer dem Projekt unbekannten Versionsnummer). Die
+   Sweep-vs-RTA-Heuristik (`is_sweep`) um Grenzfalltests (ein Sample,
+   durchgaengig stumme Samples, Peak exakt/knapp unter dem dokumentierten
+   Faktor-3-Schwellenwert) ergaenzt; dabei einen kleinen Typ-Inkonsistenz-
+   Fund behoben (ein Rueckgabepfad lieferte `np.bool_` statt `bool`).
+3. **Strikte Leitplanke zu `parse_bytes()` (Issue #7, unveraendert):**
+   `parse_bytes()` bleibt weiterhin bewusst NICHT implementiert. Diese
+   Haertungsrunde betrifft ausschliesslich den bereits nutzbaren
+   `parse_dict()`-Pfad und ist KEINE Byte-Level-Verifikation gegen eine
+   echte REW-.mdat-Datei. Issue #7 selbst bleibt offen und blockiert bis
+   fruehestens Maerz 2027.
+
+## Prioritaet 5 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
 
 - Fuzz-/Grenzwerttests fuer `validator.py` (z. B. NaN/Inf in `freq_hz`/
   `spl_db`, leere Arrays, extrem dichte oder extrem duenne Frequenzraster)
@@ -126,7 +161,7 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Schliesst Issue #2.
   niedrige/hohe Frequenzen) numerisch stabil bleibt, inkl. Tests mit
   bewusst knappen Ueberlappungsbereichen (`FrequencyGrid.overlap_with`).
 
-## Prioritaet 5 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
+## Prioritaet 6 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
 
 - `sub_optimizer.py` und `eq_solver.py`: dokumentierte Sensitivitaetstests
   (wie stark aendert sich das Optimum bei kleinen Aenderungen der
@@ -137,7 +172,7 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Schliesst Issue #2.
   Mehrpositions-Fall mit sehr wenigen Positionen (z. B. nur 2) noch
   aussagekraeftige Streuungskennzahlen liefert.
 
-## Prioritaet 6 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
+## Prioritaet 7 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
 
 - Abgleich aller Modul-Docstrings gegen `docs/SPECIFICATION.md`, ob
   zwischenzeitliche Praezisierungen (wie die in Prioritaet 1 ergaenzten
