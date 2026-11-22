@@ -15,7 +15,12 @@ Zwischenform, nicht auf echten Binaer-`.mdat`-Dateien:
             "impulse_response": {"samples": [...], "sample_interval_s": ...} (optional),
             "notes": "..." (optional, REW-Notes-Text fuer diesen Kanal)},
       "r": {...gleiche Struktur...},
-      "sub": {...optional, gleiche Struktur wie l/r...}
+      "sub": {...optional, gleiche Struktur wie l/r...},
+      "lr": {"freq_hz": [...], "spl_db": [...]} (optional, nur an "sofa_mitte"
+            ausgewertet: reale L+R-Summenmessung als dritte Konsistenz-
+            Pruefebene gegen die phasenrichtige komplexe Summe aus l und r,
+            Band 20-80 Hz; an anderen Positionen Warnung und ignoriert; ohne
+            `lr` bleibt das Verhalten unveraendert)
     },
     ...
   ]
