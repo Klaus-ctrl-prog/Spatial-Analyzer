@@ -46,7 +46,47 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22:
    Soll-Werten (Pegel, Delay, Polaritaet) abgesichert, Fehlergrenzen direkt
    in den Tests bzw. Docstrings dokumentiert statt impliziter Annahmen.
 
-## Prioritaet 2 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
+## Prioritaet 2 - Komplexe Mehrwege-Summierung (Pruefung, Haertung & Tests)
+
+Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Alle Tests sind
+ausdruecklich algorithmische Verifikation an synthetischen Daten, keine
+Fahrzeug- oder Raumvalidierung.
+
+1. **Synthetische Mehrwege-Referenztests:** Exakte analytische Referenzwerte
+   fuer konstruktive (0 Grad, +6,0206 dB bei gleich starken, phasengleichen
+   Quellen) und destruktive (180 Grad, exakte Ausloeschung) Addition waren
+   fuer `complex_response.py` und `lr_sum.py` bereits vorhanden
+   (`test_in_phase_equal_sources_double_amplitude`,
+   `test_out_of_phase_equal_sources_cancel`); fuer `sub_optimizer.py`
+   ergaenzt (`TestExactAnalyticConstructiveSum`, Score ≈ 0 bei exakt
+   analytischem Zielwert, Fehlergrenze 1e-9).
+2. **Frequenzraster- & NaN-Robustheit - echter Fund:** `optimize()` nutzte
+   `np.mean()`/`np.std()` statt `np.nanmean()`/`np.nanstd()` - ein einziger
+   NaN/Inf-Wert im Uebergangsband (z. B. aus einer Interpolation ausserhalb
+   des Quellbereichs, siehe `grid.py`) machte `score_grid` an JEDEM
+   Gitterpunkt zu NaN. Da `NaN < best_score` immer `False` ist, wurde
+   `best` dann nie aktualisiert und die Funktion lieferte unbemerkt den
+   bedeutungslosen Default (Gain 0 dB, Delay 0 ms, erste Polaritaet,
+   Score `inf`) zurueck, als sei das ein echtes Ergebnis - in `pipeline.py`
+   haette das (ohne den dort vorhandenen `except ValueError`, der bisher
+   nichts zu fangen hatte) unbemerkt als scheinbar echte Empfehlung im
+   Report gelandet. Behoben: expliziter `np.isfinite()`-Guard ueber das
+   Uebergangsband, der jetzt einen klaren `ValueError` wirft (von
+   `pipeline.py`s bestehendem Fehlerpfad abgefangen und als "Subwoofer-
+   Optimierung uebersprungen: ..." im Report vermerkt, statt eine
+   bedeutungslose Empfehlung zu zeigen).
+3. **Mehrdeutige Optimierungsergebnisse & Fehlergrenzen:** Dokumentierter
+   und testgestuetzter Befund zur 360-Grad-Periodizitaet bei schmalen
+   Baendern (z. B. dem Modenband 60-62 Hz): Delays, die sich um ein
+   ganzzahliges Vielfaches der Periode der Bandmittenfrequenz unterscheiden
+   (~16,39 ms bei 61 Hz), sind bei schmaler Bandbreite NAHEZU, aber nicht
+   exakt, entartet (Score-Unterschied < 1e-3 Score-Einheiten in einem
+   konkreten Testfall), waehrend eine halbe Periode (destruktiv statt
+   konstruktiv) einen um mehr als drei Groessenordnungen schlechteren Score
+   ergibt. In `optimize()`s Docstring als bekannte Eigenschaft der
+   Zielfunktion dokumentiert, nicht als Implementierungsfehler.
+
+## Prioritaet 3 - Robustheit des Import-/Validierungspfads (Vorschlag, noch nicht begonnen)
 
 - Fuzz-/Grenzwerttests fuer `validator.py` (z. B. NaN/Inf in `freq_hz`/
   `spl_db`, leere Arrays, extrem dichte oder extrem duenne Frequenzraster)
@@ -56,7 +96,7 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22:
   niedrige/hohe Frequenzen) numerisch stabil bleibt, inkl. Tests mit
   bewusst knappen Ueberlappungsbereichen (`FrequencyGrid.overlap_with`).
 
-## Prioritaet 3 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
+## Prioritaet 4 - Nachvollziehbarkeit der Optimierer-Zielfunktionen (Vorschlag, noch nicht begonnen)
 
 - `sub_optimizer.py` und `eq_solver.py`: dokumentierte Sensitivitaetstests
   (wie stark aendert sich das Optimum bei kleinen Aenderungen der
@@ -67,7 +107,7 @@ Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22:
   Mehrpositions-Fall mit sehr wenigen Positionen (z. B. nur 2) noch
   aussagekraeftige Streuungskennzahlen liefert.
 
-## Prioritaet 4 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
+## Prioritaet 5 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
 
 - Abgleich aller Modul-Docstrings gegen `docs/SPECIFICATION.md`, ob
   zwischenzeitliche Praezisierungen (wie die in Prioritaet 1 ergaenzten
