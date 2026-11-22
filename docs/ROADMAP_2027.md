@@ -217,23 +217,82 @@ mit sehr wenigen Positionen (z. B. nur 2) noch aussagekraeftige
 Streuungskennzahlen liefert, sowie eine analoge Sensitivitaetsbetrachtung
 fuer `eq_solver.py`.
 
-## Prioritaet 7 - Dokumentations- und Test-Konsistenz (Vorschlag, noch nicht begonnen)
+## Prioritaet 7 - Dokumentations- und Test-Konsistenz
 
-- Abgleich aller Modul-Docstrings gegen `docs/SPECIFICATION.md`, ob
-  zwischenzeitliche Praezisierungen (wie die in Prioritaet 1 ergaenzten
-  Haertungshinweise) konsistent uebernommen sind.
-- Pruefen, ob `docs/REW_NOTES_TEMPLATE.md` und die Notes-Durchreichung
-  (`pipeline.py`/`reporting.py`) nach den seither ergaenzten Funktionen
-  (Compare-Modus, `--dry-run`) noch vollstaendig und aktuell sind.
+Umgesetzt per PR, siehe Commit-Historie ab 2026-11-22. Letzter Punkt des
+Arbeitsplans - keine Code-Aenderung am Rechenkern, keine Aenderung an
+`docs/SMART453_BASS_SPEC.md`.
+
+1. **`README.md` aktualisiert:** der veraltete Status-Hinweis "Phase 1"
+   (Stand Projektstart, siehe `docs/SPECIFICATION.md` Abschnitt 4) wurde
+   durch den tatsaechlichen Reifegrad ersetzt - abgeschlossene Phasen 1-3,
+   die seither ergaenzten Funktionen (Windows-Starterdatei, REW-Notes-
+   Durchreichung, Schema-Validierung/`--dry-run`, A/B-Vergleichsmodus) und
+   der vollstaendige Stand der Haertungsphase (Prioritaeten 1-6 Teil 1
+   abgeschlossen, Prioritaet 6 Teil 2 und Prioritaet 7 bei Erstellung
+   dieses Eintrags offen bzw. laufend). Die bis Fruehjahr 2027
+   zurueckgestellten offenen GitHub-Issues (#4, #5, #6, #7) sind jetzt
+   auch im README einzeln benannt, nicht nur in diesem Dokument.
+2. **Docstring-Abgleich gegen `docs/SPECIFICATION.md`:** ein echter Fund -
+   `fdw.py` implementiert Abschnitt 3.D.3 ("Frequenzabhaengige Fensterung
+   (FDW)"), hatte aber im Gegensatz zu allen anderen D.x-Modulen
+   (`bass_resonance.py`=D.1, `lr_sum.py`=D.2, `etc.py`=D.4,
+   `biquad_preview.py`=D.5) KEINE Referenz auf diesen Abschnitt im
+   Docstring. Ergaenzt, keine inhaltliche Aenderung. `complex_response.py`
+   (gemeinsame Mathe-Infrastruktur mehrerer Abschnitte) und `validator.py`
+   (spaetere Ergaenzung ohne eigenen Spec-Abschnitt, GitHub-Issue #10)
+   bleiben bewusst ohne Einzelverweis - dokumentiert in
+   `tests/test_docs_consistency.py`.
+3. **`docs/REW_NOTES_TEMPLATE.md` vs. Notes-Durchreichung:** der dort
+   referenzierte Berichts-Abschnittstitel ("Mess- & DSP-Notizen (aus
+   REW)") stimmt weiterhin exakt mit `reporting.py` ueberein - keine
+   Abweichung gefunden, jetzt aber als Regressionstest abgesichert statt
+   nur von Hand geprueft. Compare-Modus und `--dry-run` beruehren die
+   Notes-Durchreichung nicht (unabhaengige Funktionen), daher keine
+   Aktualisierung dort notwendig.
+4. **Automatisierte Konsistenztests** (`tests/test_docs_consistency.py`,
+   26 neue Tests): Spec-Referenz-Vollstaendigkeit pro Modul,
+   REW-Notes-Template-Abschnittstitel, README-Status (kein veralteter
+   "Phase 1"-Wortlaut mehr, Verweis auf `ROADMAP_2027.md` vorhanden,
+   zurueckgestellte Issue-Nummern genannt), sowie durchgehende
+   Prioritaets-Nummerierung 1-7 in diesem Dokument selbst.
+
+## Finaler Stand der Haertungsphase (Stand 2026-11-22)
+
+Prioritaeten 1-5 und 6 (Teil 1) sowie 7 abgeschlossen (siehe jeweilige
+Abschnitte oben und Commit-/PR-Historie #14-#20). Ein Punkt bleibt
+bewusst offen fuer eine spaetere, eigene Haertungsrunde:
+
+- **Prioritaet 6, Teil 2 (offen):** `validate_no_harm()` im
+  Mehrpositions-Grenzfall mit sehr wenigen Positionen (z. B. nur 2), sowie
+  eine zu Prioritaet 6/Teil 1 analoge Sensitivitaetsbetrachtung fuer
+  `eq_solver.py`. War nicht Teil des Auftrags fuer Prioritaet 6 und wurde
+  dort bewusst nicht mitgezogen.
 
 ## Zurueckgestellt bis reale Messdaten vorliegen (ab Fruehjahr 2027)
 
-- Jede Validierung gegen eine echte, unveraenderte REW-`.mdat`-Datei
-  (`mdat.py` Abschnitt G.4 der Spezifikation; `parse_bytes()` bleibt bis
-  dahin bewusst `NotImplementedError`).
-- Unabhaengige Plausibilisierung von `mdat.py`/`models.py` gegen den
-  REW-Text-Export bzw. die REW-API (siehe
-  `claude/secs_mdat_pruefbericht.md` Abschnitt 8).
+Betrifft ausschliesslich die folgenden vier offenen GitHub-Issues - alle
+vier sind reale Validierungs-/Kalibrierungsaufgaben, die ohne echte
+Wohnzimmer- bzw. Fahrzeugmessdaten nicht sinnvoll abschliessbar sind:
+
+- **Issue #7** - Jede Validierung gegen eine echte, unveraenderte
+  REW-`.mdat`-Datei (`mdat.py` Abschnitt G.4 der Spezifikation;
+  `parse_bytes()` bleibt bis dahin bewusst `NotImplementedError`; siehe
+  auch Prioritaet 4 oben, die sich auf dieses Issue bezieht, es aber
+  ausdruecklich nicht schliesst). Dazu gehoert auch die unabhaengige
+  Plausibilisierung von `mdat.py`/`models.py` gegen den REW-Text-Export
+  bzw. die REW-API (siehe `claude/secs_mdat_pruefbericht.md` Abschnitt 8).
+- **Issue #5** - ETC-Reflexions-Schwellenwert-Kalibrierung anhand realer
+  Wohnzimmer-Messdaten (`etc.py`, Abschnitt G.2 der Spezifikation).
+- **Issue #4** - Lesende Pruefung der REW-API-Metadaten auf aktive
+  FDW-/Window-Kennzeichnung (`fdw.py`/`rew_client.py`, Abschnitt G.1).
+- **Issue #6** - Klaerung eines optionalen spaeteren Car-Audio-Exports
+  (Mosconi-DSP mit Laufzeit in `ms`/`cm` und Phasentabelle, Abschnitt G.3)
+  - diese Entscheidung haengt am ehesten vom zurueckgestellten
+  Smart-453-Themenpaket ab, nicht primaer von Messdaten.
+
+Zusaetzlich, ohne eigene Issue-Nummer:
+
 - Jede reale Kontrollmessung fuer `sub_optimizer.py`-Ergebnisse (Messregel 1
   aus den Projekt-Vorgaben: Simulation vor Messung klar als
   "simulationsbasiert, noch nicht real verifiziert" kennzeichnen).

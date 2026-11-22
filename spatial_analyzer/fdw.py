@@ -1,5 +1,10 @@
 """Frequenzabhaengige Fensterung (FDW) auf der ungeglaetteten Roh-Impulsantwort.
 
+Siehe docs/SPECIFICATION.md Abschnitt 3.D.3 ("Frequenzabhaengige Fensterung
+(FDW)") und Zwischenstand-Doku Abschnitt 10.2/10.6 (Haertung Prioritaet 7,
+2026-11-22: dieser Verweis fehlte hier bisher, obwohl alle anderen D.x-Module
+ihn haben - ergaenzt, keine inhaltliche Aenderung).
+
 Eigene, transparent parametrisierte Implementierung - siehe Zwischenstand-Doku
 Abschnitt 10.2/10.6: REW erzwingt bei aktivem FDW eine 1/48-Oktav-Glaettung
 und es ist nicht verifiziert, ob die REW-API FDW-Parameter ueberhaupt
