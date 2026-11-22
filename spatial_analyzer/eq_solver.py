@@ -8,14 +8,17 @@ Kammfilter-Kerben oder unbestaetigte Einbrueche. Oberhalb 200 Hz begrenzte
 Filterguete Q.
 
 Jeder vorgeschlagene Filter wird vor der Aufnahme in die Ergebnisliste
-gegen die Mehrpunkt-Vorschau (biquad_preview.py) geprueft: verschlechtert
-er die raeumliche Streuung ueber die Positionen merklich, wird er verworfen
-statt blind uebernommen (validate_no_harm()).
+gegen die Mehrpunkt-Vorschau (biquad_preview.py) geprueft
+(validate_no_harm()). Das Ergebnis ist ein Drei-Stufen-Status
+(SAFE/UNSAFE/INCONCLUSIVE, siehe NoHarmStatus): nur SAFE ist freigegeben;
+bei UNSAFE/INCONCLUSIVE kennzeichnen pipeline.py und die Exporte die
+Artefakte deutlich als NICHT FREIGEGEBEN.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -29,6 +32,9 @@ DEFAULT_MAX_BROADBAND_Q = 2.0
 DEFAULT_MAX_BROADBAND_GAIN_DB = 6.0
 DEFAULT_MIN_FC_SPACING_OCT = 0.5
 DEFAULT_SPATIAL_HARM_TOLERANCE_DB = 0.5
+DEFAULT_LOCAL_HARM_TOLERANCE_DB = 2.0  # Arbeitswert: max. Zunahme der Streuung an einer Frequenz
+DEFAULT_TARGET_HARM_TOLERANCE_DB = 0.5  # Arbeitswert: max. Zunahme der RMS-Zielabweichung
+MIN_POSITIONS_FOR_NO_HARM = 3  # Arbeitswert: darunter keine belastbare raeumliche Aussage
 
 
 @dataclass
@@ -171,6 +177,52 @@ def propose_broadband_correction(
     return proposals
 
 
+class NoHarmStatus(str, Enum):
+    """Drei-Stufen-Freigabestatus der Do-No-Harm-Pruefung.
+
+    - SAFE: geprueft und innerhalb der Toleranzen.
+    - UNSAFE: Schaden erkannt (globale oder frequenzlokale Zunahme der
+      raeumlichen Streuung oder Verschlechterung der Zielkurvenabweichung).
+    - INCONCLUSIVE: nicht belastbar pruefbar (z. B. keine Phase, weniger
+      als `MIN_POSITIONS_FOR_NO_HARM` Positionen, nicht-endliche Werte).
+      Wie UNSAFE ist das NICHT freigegeben - ein fehlendes Urteil ist
+      kein "sicher".
+    """
+
+    SAFE = "SAFE"
+    UNSAFE = "UNSAFE"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+    @property
+    def is_released(self) -> bool:
+        return self is NoHarmStatus.SAFE
+
+
+@dataclass
+class NoHarmResult:
+    status: NoHarmStatus
+    reason: str
+    n_positions: int
+    spread_before_db: float | None = None  # NaN-frei oder None
+    spread_after_db: float | None = None
+    max_local_spread_increase_db: float | None = None
+    max_local_spread_increase_hz: float | None = None
+    target_dev_before_db: float | None = None
+    target_dev_after_db: float | None = None
+
+    @property
+    def is_released(self) -> bool:
+        return self.status.is_released
+
+
+def inconclusive_result(reason: str, n_positions: int = 0) -> NoHarmResult:
+    return NoHarmResult(NoHarmStatus.INCONCLUSIVE, reason, n_positions)
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
 def validate_no_harm(
     freq_hz: np.ndarray,
     position_ids: list[str],
@@ -180,17 +232,94 @@ def validate_no_harm(
     filters_r: list[PeakingFilter],
     fs: float = 48000.0,
     tolerance_db: float = DEFAULT_SPATIAL_HARM_TOLERANCE_DB,
-) -> tuple[bool, float, float]:
+    local_tolerance_db: float = DEFAULT_LOCAL_HARM_TOLERANCE_DB,
+    target_db: np.ndarray | None = None,
+    target_tolerance_db: float = DEFAULT_TARGET_HARM_TOLERANCE_DB,
+    min_positions: int = MIN_POSITIONS_FOR_NO_HARM,
+) -> NoHarmResult:
     """Prueft, ob die vorgeschlagenen Filter die raeumliche Streuung (Std.
-    ueber alle Positionen, gemittelt ueber den Frequenzbereich) der L+R-Summe
-    nicht merklich verschlechtern.
+    ueber alle Positionen) der L+R-Summe oder die Zielkurvenabweichung
+    verschlechtern, und liefert ein explizites Drei-Stufen-Urteil
+    (`NoHarmStatus`) statt eines blossen `bool`.
 
-    Rueckgabe: (ist_sicher, streuung_vorher_db, streuung_nachher_db).
+    Kriterien (alle Toleranzen sind Arbeitswerte, keine physikalischen
+    Grenzen):
+    1. Globale Streuung: Mittel der Std. ueber alle Frequenzen
+       (nachher - vorher > `tolerance_db` -> UNSAFE).
+    2. Frequenzlokal/schmalbandig: groesste Zunahme der Std. an EINER
+       Frequenz (> `local_tolerance_db` -> UNSAFE) - ein globaler Mittelwert
+       kann eine schmalbandige Verschlechterung verdecken.
+    3. Zielkurve (nur wenn `target_db` auf dem Raster von `freq_hz`
+       uebergeben wird): RMS-Abweichung des positionsgemittelten L- bzw.
+       R-Pegels zur Zielkurve; Zunahme > `target_tolerance_db` -> UNSAFE.
+
+    INCONCLUSIVE (statt eines stillen NaN-Vergleichs): weniger als
+    `min_positions` Positionen (Std. mit ddof=1 ist bei N=1 NaN, bei N=2
+    keine belastbare raeumliche Aussage), nicht-endliche Eingaben oder
+    nicht-endliche Zwischenwerte. Ohne Filter gibt es nichts zu
+    verschlechtern: SAFE.
     """
+    n_positions = int(np.asarray(l_complex).shape[0]) if np.ndim(l_complex) == 2 else 0
+    if not filters_l and not filters_r:
+        return NoHarmResult(
+            NoHarmStatus.SAFE, "keine Filter vorgeschlagen - nichts zu verschlechtern", n_positions
+        )
+    if n_positions < min_positions:
+        return inconclusive_result(
+            f"nur {n_positions} Position(en) - fuer eine belastbare raeumliche Aussage "
+            f"sind mindestens {min_positions} noetig",
+            n_positions,
+        )
+
     preview = simulate_multi_position_preview(
         freq_hz, position_ids, l_complex, r_complex, filters_l, filters_r, fs
     )
-    spread_before = float(np.mean(np.std(preview.lr_before_db, axis=0, ddof=1)))
-    spread_after = float(np.mean(np.std(preview.lr_after_db, axis=0, ddof=1)))
-    is_safe = (spread_after - spread_before) <= tolerance_db
-    return is_safe, spread_before, spread_after
+    std_before = np.std(preview.lr_before_db, axis=0, ddof=1)
+    std_after = np.std(preview.lr_after_db, axis=0, ddof=1)
+    if not (np.all(np.isfinite(std_before)) and np.all(np.isfinite(std_after))):
+        return inconclusive_result("nicht-endliche Streuungswerte in der Vorschau", n_positions)
+
+    spread_before = float(np.mean(std_before))
+    spread_after = float(np.mean(std_after))
+    delta = std_after - std_before
+    worst = int(np.argmax(delta))
+    max_local = float(delta[worst])
+    max_local_hz = float(np.asarray(freq_hz, dtype=np.float64)[worst])
+
+    dev_before = dev_after = None
+    if target_db is not None:
+        target = np.asarray(target_db, dtype=np.float64)
+        if target.shape != np.asarray(freq_hz).shape or not np.all(np.isfinite(target)):
+            return inconclusive_result("target_db passt nicht zu freq_hz oder ist nicht endlich", n_positions)
+        dev_before = max(
+            _rms(np.mean(preview.l_before_db, axis=0) - target),
+            _rms(np.mean(preview.r_before_db, axis=0) - target),
+        )
+        dev_after = max(
+            _rms(np.mean(preview.l_after_db, axis=0) - target),
+            _rms(np.mean(preview.r_after_db, axis=0) - target),
+        )
+
+    problems = []
+    if spread_after - spread_before > tolerance_db:
+        problems.append(
+            f"mittlere raeumliche Streuung steigt {spread_before:.2f} dB -> {spread_after:.2f} dB"
+        )
+    if max_local > local_tolerance_db:
+        problems.append(
+            f"lokale Streuung steigt um {max_local:.2f} dB bei {max_local_hz:.1f} Hz"
+        )
+    if dev_before is not None and dev_after - dev_before > target_tolerance_db:
+        problems.append(
+            f"Zielkurvenabweichung steigt {dev_before:.2f} dB -> {dev_after:.2f} dB"
+        )
+
+    if problems:
+        status, reason = NoHarmStatus.UNSAFE, "; ".join(problems)
+    else:
+        status = NoHarmStatus.SAFE
+        reason = f"raeumliche Streuung {spread_before:.2f} dB -> {spread_after:.2f} dB, innerhalb der Toleranzen"
+    return NoHarmResult(
+        status, reason, n_positions, spread_before, spread_after, max_local, max_local_hz,
+        dev_before, dev_after,
+    )

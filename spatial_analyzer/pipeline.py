@@ -60,12 +60,16 @@ from spatial_analyzer.etc import classify_bass_dip
 from spatial_analyzer.eq_solver import (
     EqProposal,
     ModeConfirmation,
+    NoHarmResult,
+    NoHarmStatus,
+    inconclusive_result,
     propose_broadband_correction,
     propose_mode_cuts,
     validate_no_harm,
 )
 from spatial_analyzer.exporters import export_kefplayer_json, export_rew_generic_eq_txt
 from spatial_analyzer.grid import interpolate_to_grid, r160_grid
+from spatial_analyzer.lr_sum import compare_predicted_vs_measured, predict_complex_sum
 from spatial_analyzer.models import RoomModel
 from spatial_analyzer.reporting import MeasurementNote, Report, write_frequency_table_csv
 from spatial_analyzer.sub_optimizer import optimize as optimize_sub
@@ -335,7 +339,7 @@ def _collect_measurement_notes(positions: list[dict[str, Any]]) -> list[Measurem
                 MeasurementNote(position_id=position_id, channel=None, text=position_note.strip())
             )
 
-        for channel_key in ("l", "r", "sub"):
+        for channel_key in ("l", "r", "sub", "lr"):
             channel = position.get(channel_key)
             if not isinstance(channel, dict):
                 continue
@@ -347,6 +351,47 @@ def _collect_measurement_notes(positions: list[dict[str, Any]]) -> list[Measurem
                     )
                 )
     return collected
+
+
+def _lr_sum_consistency(positions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Dritte Pruefebene: reale L+R-Summenmessung an `sofa_mitte` gegen die
+    phasenrichtige komplexe Summe aus L und R (lr_sum.py). Gibt None zurueck,
+    wenn keine `lr`-Messung an sofa_mitte vorliegt (abwaertskompatibel);
+    wirft `ValueError`, wenn sie vorliegt, aber nicht auswertbar ist (z. B.
+    keine Phase an L/R, kein gemeinsamer Frequenzbereich, Band ausserhalb).
+    L, R und lr werden auf EIN gemeinsames R160-Raster (Schnittmenge der
+    Frequenzbereiche) interpoliert; Phase vorher entpackt."""
+    ref = next((p for p in positions if p.get("id") == "sofa_mitte"), None)
+    if ref is None or not isinstance(ref.get("lr"), dict):
+        return None
+    l_entry, r_entry, lr_entry = ref.get("l"), ref.get("r"), ref["lr"]
+    if not (isinstance(l_entry, dict) and isinstance(r_entry, dict)):
+        raise ValueError("sofa_mitte hat lr, aber keine vollstaendigen L/R-Daten")
+    if "phase_deg" not in l_entry or "phase_deg" not in r_entry:
+        raise ValueError("fuer die komplexe Vorhersage fehlt die Phase an sofa_mitte L oder R")
+
+    entries = (l_entry, r_entry, lr_entry)
+    grid = r160_grid(
+        max(min(e["freq_hz"]) for e in entries), min(max(e["freq_hz"]) for e in entries)
+    )
+
+    def on_grid(entry: dict[str, Any], key: str, unwrap: bool = False) -> np.ndarray:
+        values = _unwrap_phase_deg(entry[key]) if unwrap else np.asarray(entry[key], dtype=np.float64)
+        return interpolate_to_grid(np.asarray(entry["freq_hz"], dtype=np.float64), values, grid)
+
+    predicted = predict_complex_sum(
+        on_grid(l_entry, "spl_db"), on_grid(l_entry, "phase_deg", True),
+        on_grid(r_entry, "spl_db"), on_grid(r_entry, "phase_deg", True),
+    )
+    cmp = compare_predicted_vs_measured(grid, predicted, on_grid(lr_entry, "spl_db"))
+    band_mask = (grid >= cmp.band_hz[0]) & (grid <= cmp.band_hz[1])
+    return {
+        "band_hz": list(cmp.band_hz),
+        "n_points": int(np.count_nonzero(band_mask)),
+        "rmse_db": cmp.rmse_db,
+        "max_abs_diff_db": float(np.nanmax(np.abs(cmp.diff_db[band_mask]))),
+        "meaning": "Konsistenz-Check (Vorhersage minus Messung), kein automatisches Urteil",
+    }
 
 
 def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
@@ -422,24 +467,34 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         joint_lr = _build_joint_lr_data(positions)
     except ValueError as exc:
         joint_lr = None
+        do_no_harm = inconclusive_result(str(exc))
         notes.append(f"Do-No-Harm-Check uebersprungen: {exc}.")
 
     if joint_lr is not None:
         l_complex = to_complex(joint_lr.l_spl_db, joint_lr.l_phase_deg)
         r_complex = to_complex(joint_lr.r_spl_db, joint_lr.r_phase_deg)
-        is_safe, spread_before, spread_after = validate_no_harm(
-            joint_lr.freq_hz, joint_lr.position_ids, l_complex, r_complex, filters_l, filters_r
+        do_no_harm = validate_no_harm(
+            joint_lr.freq_hz, joint_lr.position_ids, l_complex, r_complex, filters_l, filters_r,
+            target_db=absolute_target_db(joint_lr.freq_hz, reference_level_db, target_config),
         )
-        if not is_safe:
+        if do_no_harm.status is NoHarmStatus.SAFE:
+            notes.append(f"Do-No-Harm-Check bestanden (SAFE): {do_no_harm.reason}.")
+        elif do_no_harm.status is NoHarmStatus.UNSAFE:
             notes.append(
-                f"Do-No-Harm-Check: vorgeschlagene Filter erhoehen die raeumliche Streuung "
-                f"({spread_before:.2f} dB -> {spread_after:.2f} dB) - vor Anwendung pruefen."
+                f"Do-No-Harm-Check: UNSAFE - {do_no_harm.reason} - Exporte sind als "
+                "NICHT FREIGEGEBEN gekennzeichnet, vor Anwendung pruefen."
             )
         else:
             notes.append(
-                f"Do-No-Harm-Check bestanden: raeumliche Streuung {spread_before:.2f} dB -> "
-                f"{spread_after:.2f} dB."
+                f"Do-No-Harm-Check INCONCLUSIVE - {do_no_harm.reason} - Exporte sind als "
+                "UNGEPRUEFT / NICHT FREIGEGEBEN gekennzeichnet."
             )
+
+    lr_sum_check = None
+    try:
+        lr_sum_check = _lr_sum_consistency(positions)
+    except ValueError as exc:
+        notes.append(f"L+R-Summen-Konsistenzpruefung uebersprungen: {exc}.")
 
     sub_result = None
     has_sub_everywhere = all(p.get("sub") for p in positions)
@@ -520,6 +575,8 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         eq_proposals_r=eq_proposals_r,
         measurement_notes=measurement_notes,
         notes=notes,
+        do_no_harm=do_no_harm,
+        lr_sum_check=lr_sum_check,
     )
 
     report.write_json(output_dir / "report.json")
@@ -534,8 +591,26 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         r_data.freq_hz,
         {"averaged_spl_db": averaged_r, "target_db": target_r, "spread_std_db": spread_r.std_db},
     )
-    export_kefplayer_json(output_dir / "kefplayer_profile.json", filters_l, filters_r)
-    export_rew_generic_eq_txt(output_dir / "rew_eq_L.txt", filters_l)
-    export_rew_generic_eq_txt(output_dir / "rew_eq_R.txt", filters_r)
+    # Nur SAFE ist freigegeben; UNSAFE/INCONCLUSIVE werden in Profilname,
+    # REW-Kommentar und Begleitdatei deutlich als NICHT FREIGEGEBEN markiert.
+    if do_no_harm.is_released:
+        profile_name, rew_header = "spatial_analyzer", None
+    else:
+        label = (
+            "UNSAFE - NICHT FREIGEGEBEN"
+            if do_no_harm.status is NoHarmStatus.UNSAFE
+            else "UNGEPRUEFT - NICHT FREIGEGEBEN"
+        )
+        profile_name = f"spatial_analyzer [{label}]"
+        rew_header = f"{label}\nDo-No-Harm-Status: {do_no_harm.status.value}\n{do_no_harm.reason}"
+        (output_dir / "NICHT_FREIGEGEBEN.txt").write_text(
+            f"{label}\n\nDo-No-Harm-Status: {do_no_harm.status.value}\nGrund: {do_no_harm.reason}\n\n"
+            "Die Exportdateien kefplayer_profile.json, rew_eq_L.txt und rew_eq_R.txt in diesem "
+            "Ordner duerfen nicht ungeprueft angewendet werden.\n",
+            encoding="utf-8",
+        )
+    export_kefplayer_json(output_dir / "kefplayer_profile.json", filters_l, filters_r, name=profile_name)
+    export_rew_generic_eq_txt(output_dir / "rew_eq_L.txt", filters_l, header_comment=rew_header)
+    export_rew_generic_eq_txt(output_dir / "rew_eq_R.txt", filters_r, header_comment=rew_header)
 
     return report

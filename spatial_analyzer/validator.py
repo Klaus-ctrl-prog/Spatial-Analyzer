@@ -273,8 +273,16 @@ def validate_input(data: Any) -> list[ValidationIssue]:
         if "l" not in position and "r" not in position:
             issues.append(ValidationIssue("error", prefix, "hat weder Kanal 'l' noch 'r'"))
 
-        for channel_key in ("l", "r", "sub"):
+        for channel_key in ("l", "r", "sub", "lr"):
             if channel_key in position:
+                if channel_key == "lr" and pos_id != "sofa_mitte":
+                    issues.append(
+                        ValidationIssue(
+                            "warning", f"{prefix}.lr",
+                            "reale L+R-Summenmessung wird nur an id='sofa_mitte' ausgewertet - "
+                            "diese lr-Messung wird ignoriert",
+                        )
+                    )
                 if channel_key == "l":
                     has_l = True
                 if channel_key == "r":

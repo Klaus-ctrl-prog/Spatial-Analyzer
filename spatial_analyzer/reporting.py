@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from spatial_analyzer.eq_solver import EqProposal, ModeConfirmation
+from spatial_analyzer.eq_solver import EqProposal, ModeConfirmation, NoHarmResult, NoHarmStatus
 from spatial_analyzer.sub_optimizer import SubOptimizerResult
 
 
@@ -64,6 +64,12 @@ class Report:
     eq_proposals_r: list[EqProposal] = field(default_factory=list)
     measurement_notes: list[MeasurementNote] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Freigabestatus der EQ-Vorschlaege (None nur, wenn nie geprueft wurde -
+    # wird im Report wie INCONCLUSIVE behandelt, nie als freigegeben).
+    do_no_harm: NoHarmResult | None = None
+    # Dritte Pruefebene: reale L+R-Summenmessung vs. komplexe Vorhersage
+    # (None, wenn keine `lr`-Messung an sofa_mitte mitgegeben wurde).
+    lr_sum_check: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,7 +101,13 @@ class Report:
                     else None
                 ),
             },
+            "konsistenzpruefung": {"lr_summe": self.lr_sum_check},
             "empfehlungen": {
+                "freigabe": release_banner(self.do_no_harm)[1],
+                "freigabe_status": (
+                    self.do_no_harm.status.value if self.do_no_harm else NoHarmStatus.INCONCLUSIVE.value
+                ),
+                "freigabe_grund": self.do_no_harm.reason if self.do_no_harm else "nicht geprueft",
                 "eq_proposals_l": [_proposal_to_dict(p) for p in self.eq_proposals_l],
                 "eq_proposals_r": [_proposal_to_dict(p) for p in self.eq_proposals_r],
             },
@@ -113,6 +125,18 @@ class Report:
 
     def write_html(self, path: str | Path) -> None:
         Path(path).write_text(render_html(self), encoding="utf-8")
+
+
+def release_banner(result: NoHarmResult | None) -> tuple[str, str]:
+    """(CSS-Klasse, Klartext) fuer den Freigabestatus. Alles ausser SAFE
+    ist deutlich als NICHT FREIGEGEBEN gekennzeichnet."""
+    if result is None:
+        return "release-inconclusive", "UNGEPRUEFT / NICHT FREIGEGEBEN (Do-No-Harm-Pruefung nicht durchgefuehrt)"
+    if result.status is NoHarmStatus.SAFE:
+        return "release-safe", "SAFE - Do-No-Harm-Pruefung bestanden"
+    if result.status is NoHarmStatus.UNSAFE:
+        return "release-unsafe", "NICHT FREIGEGEBEN / UNSAFE - Schaden erkannt: " + result.reason
+    return "release-inconclusive", "UNGEPRUEFT / NICHT FREIGEGEBEN (INCONCLUSIVE): " + result.reason
 
 
 def _proposal_to_dict(p: EqProposal) -> dict[str, Any]:
@@ -186,7 +210,7 @@ def render_html(report: Report) -> str:
 
     def measurement_note_rows() -> str:
         rows = []
-        channel_labels = {"l": "L", "r": "R", "sub": "Sub"}
+        channel_labels = {"l": "L", "r": "R", "sub": "Sub", "lr": "L+R"}
         for n in report.measurement_notes:
             channel_label = channel_labels.get(n.channel, "Position (gesamt)")
             rows.append(
@@ -195,6 +219,17 @@ def render_html(report: Report) -> str:
             )
         return "\n".join(rows) or "<tr><td colspan='3'><em>keine</em></td></tr>"
 
+    banner_class, banner_text = release_banner(report.do_no_harm)
+    lr = report.lr_sum_check
+    lr_html = (
+        f"<p>Band {lr['band_hz'][0]:.0f}-{lr['band_hz'][1]:.0f} Hz, {lr['n_points']} Rasterpunkte: "
+        f"RMSE {lr['rmse_db']:.2f} dB, max. |Differenz| {lr['max_abs_diff_db']:.2f} dB "
+        f"(Vorhersage minus Messung).<br><strong>Hinweis:</strong> reiner Konsistenz-Check ohne "
+        f"automatisches Urteil - grosse Abweichungen deuten auf verletzte Zeitbasis oder "
+        f"Nichtlinearitaeten hin, nicht automatisch auf einen Messfehler.</p>"
+        if lr is not None
+        else "<p><em>Keine reale L+R-Summenmessung (<code>lr</code> an sofa_mitte) mitgegeben.</em></p>"
+    )
     notes_html = "".join(f"<li>{e(n)}</li>" for n in report.notes) or "<li><em>keine</em></li>"
 
     return f"""<!DOCTYPE html>
@@ -208,6 +243,9 @@ h1, h2 {{ border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }}
 table {{ border-collapse: collapse; width: 100%; margin-bottom: 1.5em; }}
 th, td {{ border: 1px solid #ccc; padding: 4px 8px; text-align: left; }}
 .model-banner {{ background: #fff3cd; padding: 0.5em; border-radius: 4px; }}
+.release-safe {{ background: #d4edda; padding: 0.6em; border-radius: 4px; font-weight: bold; }}
+.release-unsafe {{ background: #f8d7da; padding: 0.6em; border-radius: 4px; font-weight: bold; }}
+.release-inconclusive {{ background: #ffe5b4; padding: 0.6em; border-radius: 4px; font-weight: bold; }}
 </style>
 </head>
 <body>
@@ -241,6 +279,12 @@ Abschnitt "Hinweise" unten dafuer.</em></p>
 <div class="model-banner">70/30-Zielfunktion ist eine bewusst gewaehlte
 Gewichtung, kein gemessener oder abgeleiteter Wert.</div>
 {sub_html}
+
+<h2>Konsistenzpruefung: L+R-Summe (dritte Pruefebene)</h2>
+{lr_html}
+
+<h2>Freigabestatus der EQ-Vorschlaege</h2>
+<div class="{banner_class}">{e(banner_text)}</div>
 
 <h2>Empfehlungen: EQ-Vorschlaege L</h2>
 <table>

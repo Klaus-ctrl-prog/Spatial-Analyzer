@@ -352,3 +352,125 @@ class TestRunPipelineJointLrHardening:
         assert any("bestanden" in n for n in do_no_harm_notes) or any(
             "vorgeschlagene Filter erhoehen" in n for n in do_no_harm_notes
         )
+
+
+def _write_input(path, positions):
+    data = {"room_dimensions_m": [5.72, 3.72, 2.40], "positions": positions}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _lr_entry(freq, offset_db):
+    """Reale L+R-Summe: L und R sind identisch und phasengleich, die kohaerente
+    Summe liegt daher 6.02 dB ueber dem Einzelkanal; `offset_db` verstimmt sie."""
+    pos = _synthetic_position("x")
+    spl = np.asarray(pos["l"]["spl_db"]) + 20.0 * np.log10(2.0) + offset_db
+    return {"freq_hz": freq, "spl_db": spl.tolist()}
+
+
+class TestRunPipelineLrSumCheck:
+    def _positions(self, lr_offset_db=None):
+        positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+        positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+        if lr_offset_db is not None:
+            positions[0]["lr"] = _lr_entry(positions[0]["l"]["freq_hz"], lr_offset_db)
+        return positions
+
+    def test_without_lr_channel_is_backward_compatible(self, tmp_path):
+        _write_input(tmp_path / "in.json", self._positions())
+        report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+        assert report.lr_sum_check is None
+        assert json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))[
+            "konsistenzpruefung"
+        ] == {"lr_summe": None}
+        html = (tmp_path / "out" / "report.html").read_text(encoding="utf-8")
+        assert "Keine reale L+R-Summenmessung" in html
+
+    def test_consistent_lr_sum_gives_small_rmse(self, tmp_path):
+        _write_input(tmp_path / "in.json", self._positions(lr_offset_db=0.0))
+        report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+        check = report.lr_sum_check
+        assert check is not None
+        assert check["band_hz"] == [20.0, 80.0]
+        assert check["n_points"] > 5
+        assert check["rmse_db"] < 0.1
+        html = (tmp_path / "out" / "report.html").read_text(encoding="utf-8")
+        assert "RMSE" in html and "Konsistenz-Check" in html
+
+    def test_inconsistent_lr_sum_gives_large_rmse(self, tmp_path):
+        _write_input(tmp_path / "in.json", self._positions(lr_offset_db=-6.0))
+        report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+        assert report.lr_sum_check["rmse_db"] == pytest.approx(6.0, abs=0.2)
+        assert report.lr_sum_check["max_abs_diff_db"] >= report.lr_sum_check["rmse_db"] - 1e-9
+
+    def test_lr_without_phase_skips_check_with_note(self, tmp_path):
+        positions = self._positions(lr_offset_db=0.0)
+        del positions[0]["l"]["phase_deg"]
+        _write_input(tmp_path / "in.json", positions)
+        report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+        assert report.lr_sum_check is None
+        assert any("Summen-Konsistenzpruefung uebersprungen" in n and "Phase" in n for n in report.notes)
+
+    def test_lr_on_other_position_is_ignored_with_warning(self, tmp_path):
+        from spatial_analyzer.validator import validate_input
+
+        positions = self._positions()
+        positions[1]["lr"] = _lr_entry(positions[1]["l"]["freq_hz"], 0.0)
+        issues = validate_input({"room_dimensions_m": [5.72, 3.72, 2.40], "positions": positions})
+        assert any(i.severity == "warning" and i.path.endswith(".lr") for i in issues)
+        assert not any(i.severity == "error" for i in issues)
+
+    def test_lr_alone_does_not_count_as_l_or_r(self):
+        from spatial_analyzer.validator import validate_input
+
+        pos = {"id": "sofa_mitte", "lr": _lr_entry(_synthetic_position("x")["l"]["freq_hz"], 0.0)}
+        issues = validate_input({"room_dimensions_m": [5.72, 3.72, 2.40], "positions": [pos]})
+        assert any(i.severity == "error" for i in issues)
+
+
+class TestRunPipelineReleaseMarking:
+    def _run(self, tmp_path, monkeypatch, result):
+        from spatial_analyzer import pipeline
+
+        monkeypatch.setattr(pipeline, "validate_no_harm", lambda *a, **k: result)
+        positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+        positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+        _write_input(tmp_path / "in.json", positions)
+        return run_pipeline(tmp_path / "in.json", tmp_path / "out"), tmp_path / "out"
+
+    def test_safe_exports_are_unmarked(self, tmp_path, monkeypatch):
+        from spatial_analyzer.eq_solver import NoHarmResult, NoHarmStatus
+
+        report, out = self._run(tmp_path, monkeypatch, NoHarmResult(NoHarmStatus.SAFE, "ok", 4))
+        assert not (out / "NICHT_FREIGEGEBEN.txt").exists()
+        profile = json.loads((out / "kefplayer_profile.json").read_text(encoding="utf-8"))
+        assert profile["name"] == "spatial_analyzer"
+        assert not (out / "rew_eq_L.txt").read_text(encoding="utf-8").startswith("#")
+
+    @pytest.mark.parametrize("status_name,marker", [("UNSAFE", "UNSAFE - NICHT FREIGEGEBEN"),
+                                                    ("INCONCLUSIVE", "UNGEPRUEFT - NICHT FREIGEGEBEN")])
+    def test_unreleased_exports_are_clearly_marked(self, tmp_path, monkeypatch, status_name, marker):
+        from spatial_analyzer.eq_solver import NoHarmResult, NoHarmStatus
+
+        result = NoHarmResult(NoHarmStatus(status_name), "Testgrund", 4)
+        report, out = self._run(tmp_path, monkeypatch, result)
+        assert marker in (out / "NICHT_FREIGEGEBEN.txt").read_text(encoding="utf-8")
+        profile = json.loads((out / "kefplayer_profile.json").read_text(encoding="utf-8"))
+        assert marker in profile["name"]
+        # Schema bleibt fuer KEFplayer ladbar (gleiche Schluessel wie freigegeben).
+        assert {"name", "preamp_db", "filters", "channels"} <= set(profile)
+        for side in ("L", "R"):
+            assert (out / f"rew_eq_{side}.txt").read_text(encoding="utf-8").startswith(f"# {marker}")
+        data = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        assert data["empfehlungen"]["freigabe_status"] == status_name
+        assert "NICHT FREIGEGEBEN" in data["empfehlungen"]["freigabe"]
+        html = (out / "report.html").read_text(encoding="utf-8")
+        assert "NICHT FREIGEGEBEN" in html and "Testgrund" in html
+
+    def test_two_positions_real_run_is_never_released_with_filters(self, tmp_path):
+        positions = [_synthetic_position("sofa_mitte", with_ir=True), _synthetic_position("wander_0")]
+        _write_input(tmp_path / "in.json", positions)
+        report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+        assert report.eq_proposals_l and report.eq_proposals_r  # Filter werden vorgeschlagen
+        assert report.do_no_harm.status.value == "INCONCLUSIVE"
+        assert (tmp_path / "out" / "NICHT_FREIGEGEBEN.txt").exists()
+        assert any("INCONCLUSIVE" in n for n in report.notes)

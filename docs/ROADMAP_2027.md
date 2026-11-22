@@ -211,11 +211,9 @@ Docstring-Ergaenzung in `sub_optimizer.py`):
   Befunde sind reine algorithmische Verifikation an synthetischen Daten,
   keine Aussage ueber reale Raum-/Fahrzeugdaten.
 
-**Teil 2 (weiterhin offen, nicht Teil dieser PR):** Pruefen, ob
-`validate_no_harm()` (Do-No-Harm-Check) auch fuer den Mehrpositions-Fall
-mit sehr wenigen Positionen (z. B. nur 2) noch aussagekraeftige
-Streuungskennzahlen liefert, sowie eine analoge Sensitivitaetsbetrachtung
-fuer `eq_solver.py`.
+**Teil 2:** Der `validate_no_harm()`-Grenzfall mit sehr wenigen Positionen
+ist in Haertungsrunde B (siehe unten) geschlossen. Offen bleibt die zu
+Teil 1 analoge Sensitivitaetsbetrachtung fuer `eq_solver.py`.
 
 ## Prioritaet 7 - Dokumentations- und Test-Konsistenz
 
@@ -257,17 +255,52 @@ Arbeitsplans - keine Code-Aenderung am Rechenkern, keine Aenderung an
    zurueckgestellte Issue-Nummern genannt), sowie durchgehende
    Prioritaets-Nummerierung 1-7 in diesem Dokument selbst.
 
+## Haertungsrunde B - Do-No-Harm-Statusmodell und reale L+R-Summenebene
+
+Eigener PR nach Runde A (PR #22), Stand 2026-11-22. Keine Aenderung an
+`docs/SMART453_BASS_SPEC.md`, kein `parse_bytes()` in `mdat.py`. Alle
+Befunde sind algorithmische Verifikation an synthetischen Daten, keine
+Raum- oder Fahrzeugvalidierung; die Toleranzen sind Arbeitswerte.
+
+1. **Drei-Stufen-Statusmodell (`eq_solver.py`):** `validate_no_harm()`
+   liefert statt `tuple[bool, float, float]` ein `NoHarmResult` mit
+   `NoHarmStatus.SAFE / UNSAFE / INCONCLUSIVE`. Bei `N < 3` Positionen
+   (Arbeitswert `MIN_POSITIONS_FOR_NO_HARM`) oder nicht-endlichen Werten ist
+   das Ergebnis `INCONCLUSIVE`; der bisherige stille NaN-Vergleich
+   (`np.std(ddof=1)` bei N=1, `NaN <= x` ist immer False) entfaellt. Neben
+   der mittleren Streuung (0,5 dB) prueft er die groesste frequenzlokale
+   Zunahme der Streuung (2,0 dB) und optional die RMS-Zielkurvenabweichung
+   (0,5 dB). Nur `SAFE` gilt als freigegeben.
+2. **Kennzeichnung nicht freigegebener Exporte (`pipeline.py`,
+   `exporters.py`, `reporting.py`):** Bei `UNSAFE`/`INCONCLUSIVE` tragen
+   Profilname (`kefplayer_profile.json`, Schema unveraendert) und
+   REW-EQ-Dateien (`#`-Kommentarkopf) die Markierung "NICHT FREIGEGEBEN",
+   zusaetzlich entsteht `NICHT_FREIGEGEBEN.txt`; Report (JSON und HTML)
+   zeigt den Freigabestatus samt Grund. Ob REW `#`-Zeilen beim Import
+   toleriert, ist **nicht verifiziert**; freigegebene Dateien bleiben
+   unveraendert.
+3. **Wirksame Regressionstests (`tests/test_eq_solver.py`):** Der schwache
+   `test_detects_increased_spread_from_harmful_filter` wurde durch
+   deterministische Tests ersetzt (kanalgetrennte L/R-Filter nahe
+   Teilausloeschung, schmalbandiger Boost, Zielkurve, N=1, N=2).
+4. **Reale L+R-Summenmessung (`validator.py`, `pipeline.py`,
+   `reporting.py`):** optionaler Kanal `lr` an `sofa_mitte` (an anderen
+   Positionen Warnung und Ignorieren; zaehlt nicht als L oder R). Er wird
+   mit `predict_complex_sum()` / `compare_predicted_vs_measured()` im Band
+   20-80 Hz als dritte Konsistenzebene verglichen (RMSE, max. Abweichung)
+   und im Report ausgewiesen - als Konsistenz-Check ohne automatisches
+   Urteil. Ohne `lr` bleibt das Verhalten unveraendert.
+
 ## Finaler Stand der Haertungsphase (Stand 2026-11-22)
 
 Prioritaeten 1-5 und 6 (Teil 1) sowie 7 abgeschlossen (siehe jeweilige
 Abschnitte oben und Commit-/PR-Historie #14-#20). Ein Punkt bleibt
 bewusst offen fuer eine spaetere, eigene Haertungsrunde:
 
-- **Prioritaet 6, Teil 2 (offen):** `validate_no_harm()` im
-  Mehrpositions-Grenzfall mit sehr wenigen Positionen (z. B. nur 2), sowie
-  eine zu Prioritaet 6/Teil 1 analoge Sensitivitaetsbetrachtung fuer
-  `eq_solver.py`. War nicht Teil des Auftrags fuer Prioritaet 6 und wurde
-  dort bewusst nicht mitgezogen.
+- **Prioritaet 6, Teil 2 (teilweise offen):** Der `validate_no_harm()`-
+  Grenzfall mit sehr wenigen Positionen ist in Haertungsrunde B
+  geschlossen. Offen bleibt eine zu Prioritaet 6/Teil 1 analoge
+  Sensitivitaetsbetrachtung fuer `eq_solver.py`.
 
 ## Zurueckgestellt bis reale Messdaten vorliegen (ab Fruehjahr 2027)
 

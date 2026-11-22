@@ -171,8 +171,21 @@ def build_rew_generic_eq_text(filters: list[PeakingFilter], preamp_db: float = 0
 
 
 def export_rew_generic_eq_txt(
-    path: str | Path, filters: list[PeakingFilter], preamp_db: float = 0.0
+    path: str | Path,
+    filters: list[PeakingFilter],
+    preamp_db: float = 0.0,
+    header_comment: str | None = None,
 ) -> str:
+    """`header_comment` (z. B. "NICHT FREIGEGEBEN / UNSAFE ...") wird als
+    "#"-Kommentarzeilen vorangestellt. Ob REW "#"-Zeilen beim Import
+    toleriert, ist NICHT verifiziert - der Kommentar wird deshalb nur fuer
+    nicht freigegebene Exporte gesetzt (freigegebene Dateien bleiben
+    byte-identisch zum bisherigen Format); scheitert ein Import wegen der
+    Kommentarzeile, ist das fuer ein nicht freigegebenes Artefakt
+    ausdruecklich akzeptabel."""
     text = build_rew_generic_eq_text(filters, preamp_db=preamp_db)
+    if header_comment:
+        header = "".join(f"# {line}\n" for line in header_comment.splitlines())
+        text = header + text
     Path(path).write_text(text, encoding="utf-8")
     return text
