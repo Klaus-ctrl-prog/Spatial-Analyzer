@@ -5,7 +5,7 @@ import pytest
 
 from spatial_analyzer.biquad_preview import PeakingFilter
 from spatial_analyzer.eq_solver import EqProposal, ModeConfirmation
-from spatial_analyzer.reporting import Report, write_frequency_table_csv
+from spatial_analyzer.reporting import MeasurementNote, Report, write_frequency_table_csv
 from spatial_analyzer.sub_optimizer import SubOptimizerResult
 
 
@@ -25,6 +25,9 @@ def _sample_report():
         ),
         eq_proposals_l=[EqProposal(filter=PeakingFilter(type="peq", fc=60.0, gain_db=-3.0, q=5.0), reason="test")],
         eq_proposals_r=[],
+        measurement_notes=[
+            MeasurementNote(position_id="sofa_mitte", channel="sub", text="Saxx Phase 180°, Subpegel -5 dB"),
+        ],
         notes=["Testhinweis"],
     )
 
@@ -38,6 +41,16 @@ class TestReportToDict:
         assert "empfehlungen" in d
         assert d["modellannahmen"]["mode_confirmations"][0]["freq_hz"] == 60.0
         assert d["empfehlungen"]["eq_proposals_l"][0]["gain_db"] == -3.0
+        assert "mess_und_dsp_notizen" in d
+        assert d["mess_und_dsp_notizen"][0] == {
+            "position_id": "sofa_mitte", "channel": "sub", "text": "Saxx Phase 180°, Subpegel -5 dB",
+        }
+
+    def test_measurement_notes_separate_from_system_notes(self):
+        report = _sample_report()
+        d = report.to_dict()
+        assert d["notes"] == ["Testhinweis"]
+        assert d["mess_und_dsp_notizen"] != d["notes"]
 
     def test_none_sub_optimizer_result_handled(self):
         report = _sample_report()
@@ -64,6 +77,8 @@ class TestReportWriteHtml:
         assert "<html" in text
         assert "Modellannahmen" in text
         assert "60.0 Hz" in text
+        assert "Mess- &amp; DSP-Notizen" in text
+        assert "Saxx Phase 180°, Subpegel -5 dB" in text
 
     def test_escapes_html_in_notes(self, tmp_path):
         report = _sample_report()
@@ -73,6 +88,28 @@ class TestReportWriteHtml:
         text = path.read_text(encoding="utf-8")
         assert "<script>alert(1)</script>" not in text
         assert "&lt;script&gt;" in text
+
+    def test_escapes_html_in_measurement_notes(self, tmp_path):
+        report = _sample_report()
+        report.measurement_notes = [
+            MeasurementNote(position_id="sofa_mitte", channel="l", text="<script>alert(1)</script>")
+        ]
+        path = tmp_path / "report.html"
+        report.write_html(path)
+        text = path.read_text(encoding="utf-8")
+        assert "<script>alert(1)</script>" not in text
+        assert "&lt;script&gt;" in text
+
+    def test_measurement_notes_show_position_without_channel(self, tmp_path):
+        report = _sample_report()
+        report.measurement_notes = [
+            MeasurementNote(position_id="sofa_mitte", channel=None, text="KEF Highpass 90 Hz")
+        ]
+        path = tmp_path / "report.html"
+        report.write_html(path)
+        text = path.read_text(encoding="utf-8")
+        assert "Position (gesamt)" in text
+        assert "KEF Highpass 90 Hz" in text
 
 
 class TestWriteFrequencyTableCsv:

@@ -22,6 +22,22 @@ from spatial_analyzer.sub_optimizer import SubOptimizerResult
 
 
 @dataclass
+class MeasurementNote:
+    """Ein aus der Eingabe-JSON uebernommener REW-`Notes`-Text, z. B. die
+    DSP-Einstellungen von Geraeten, die REW nicht automatisch auslesen kann
+    (KEF, Saxx DS 120, ggf. Mosconi - siehe docs/REW_NOTES_TEMPLATE.md).
+
+    Strikt getrennt von `Report.notes`: dort stehen die von der Pipeline
+    selbst erzeugten System-/Warnhinweise, hier ausschliesslich der vom
+    Nutzer in REW hinterlegte Klartext.
+    """
+
+    position_id: str
+    channel: str | None  # "l" | "r" | "sub" | None (None = ganze Position)
+    text: str
+
+
+@dataclass
 class Report:
     """Strukturierter Bericht einer Analyse-Session.
 
@@ -32,7 +48,11 @@ class Report:
     - `sub_optimizer_result`: Ergebnis der Optimierung (Modellannahme
       70/30-Gewichtung, siehe sub_optimizer.py).
     - `eq_proposals`: Filterempfehlungen (immer FieldMeaning.MODEL).
-    - `notes`: Freitext-Hinweise (z. B. offene Punkte, Warnungen).
+    - `measurement_notes`: aus der Eingabe-JSON uebernommene REW-`Notes`-
+      Texte (DSP-Einstellungen), siehe `MeasurementNote` oben - KEIN
+      System-/Statushinweis.
+    - `notes`: von der Pipeline selbst erzeugte Freitext-Hinweise (z. B.
+      offene Punkte, Warnungen).
     """
 
     generated_at: str
@@ -42,6 +62,7 @@ class Report:
     sub_optimizer_result: SubOptimizerResult | None = None
     eq_proposals_l: list[EqProposal] = field(default_factory=list)
     eq_proposals_r: list[EqProposal] = field(default_factory=list)
+    measurement_notes: list[MeasurementNote] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,6 +99,10 @@ class Report:
                 "eq_proposals_l": [_proposal_to_dict(p) for p in self.eq_proposals_l],
                 "eq_proposals_r": [_proposal_to_dict(p) for p in self.eq_proposals_r],
             },
+            "mess_und_dsp_notizen": [
+                {"position_id": n.position_id, "channel": n.channel, "text": n.text}
+                for n in self.measurement_notes
+            ],
             "notes": self.notes,
         }
 
@@ -159,6 +184,17 @@ def render_html(report: Report) -> str:
         else "<p><em>Keine Subwoofer-Optimierung in diesem Bericht.</em></p>"
     )
 
+    def measurement_note_rows() -> str:
+        rows = []
+        channel_labels = {"l": "L", "r": "R", "sub": "Sub"}
+        for n in report.measurement_notes:
+            channel_label = channel_labels.get(n.channel, "Position (gesamt)")
+            rows.append(
+                f"<tr><td>{e(n.position_id)}</td><td>{e(channel_label)}</td>"
+                f"<td>{e(n.text)}</td></tr>"
+            )
+        return "\n".join(rows) or "<tr><td colspan='3'><em>keine</em></td></tr>"
+
     notes_html = "".join(f"<li>{e(n)}</li>" for n in report.notes) or "<li><em>keine</em></li>"
 
     return f"""<!DOCTYPE html>
@@ -182,6 +218,16 @@ th, td {{ border: 1px solid #ccc; padding: 4px 8px; text-align: left; }}
 
 <h2>Messwerte</h2>
 <pre>{e(json.dumps(report.measurement_summary, indent=2, ensure_ascii=False))}</pre>
+
+<h2>Mess- &amp; DSP-Notizen (aus REW)</h2>
+<p><em>Vom Nutzer im REW-`Notes`-Feld hinterlegter Klartext (z. B. KEF-/Saxx-/Mosconi-
+Einstellungen, die REW nicht automatisch auslesen kann - siehe
+docs/REW_NOTES_TEMPLATE.md). Kein System-Hinweis der Pipeline, siehe
+Abschnitt "Hinweise" unten dafuer.</em></p>
+<table>
+<tr><th>Position</th><th>Kanal</th><th>Notiz</th></tr>
+{measurement_note_rows()}
+</table>
 
 <h2>Modellannahmen: Bestaetigte Modenkandidaten</h2>
 <div class="model-banner">Alle Werte in diesem Abschnitt sind Modellbewertungen
