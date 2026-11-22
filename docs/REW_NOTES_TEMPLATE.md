@@ -16,10 +16,20 @@ des Kanals (`l`/`r`/`sub`) übernommen wird, unverändert im Berichtsabschnitt
 
 ## Wohnzimmer (KEF LS50 Wireless Gen1 + Saxx DS 120 DSP)
 
+**Portzustand (Pflichtfeld):** Der Zustand der KEF-Bassreflexöffnungen (Stopfen
+ein oder offen) verändert Pegel, Phase und Gruppenlaufzeit der KEF bei
+ca. 60–120 Hz und damit die Sub-Übergabe. Er gilt wie die KEF-Lautstärke als
+feste Messbedingung: innerhalb einer Messkampagne (z. B. Phasenserie,
+L/R-Serie) wird er nie gewechselt, und er steht in jedem Notes-Feld. Ein
+Wechsel mitten in einer Kampagne macht die Kampagne vergleichsunfähig. Nur die
+eigene Vergleichskampagne zum Portzustand ändert ihn bewusst als einzige
+Variable (siehe `raum_akustik.md`, Abschnitt 12).
+
 ```
 Position: sofa_mitte (bzw. wander_<n>)
 KEF-Lautstärke: ___ ⚠ Pflicht - wurde im Archiv wiederholt vergessen
 KEF Highpass: ___ Hz, Flankensteilheit ___ dB/Oct
+KEF Bassreflex-Port: Stopfen ein (5 cm Basotect) / offen ⚠ Pflicht - innerhalb einer Messkampagne nie wechseln
 KEF Bass Extension: Standard / Mehr / Weniger
 KEF Phasenkorrektur: ein / aus
 KEF Desk-EQ: ___ dB
