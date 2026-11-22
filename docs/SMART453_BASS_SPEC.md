@@ -387,6 +387,45 @@ Projekt sendet zu keinem Zeitpunkt automatisch etwas an das Geraet.
 
 ---
 
+## Abgrenzung: `CobbyCode/fxroute` (ausgeschlossen)
+
+- **Lizenzrechtliche Abgrenzung (AGPL-3.0, verifiziert):** `CobbyCode/fxroute`
+  steht unter der GNU Affero General Public License, Version 3 (geprueft
+  direkt gegen die `LICENSE`-Datei des Repositories, Kopfzeilen "GNU AFFERO
+  GENERAL PUBLIC LICENSE" / "Version 3, 19 November 2007"). Jede Uebernahme
+  oder Weitergabe von Code daraus wird ausgeschlossen, da die
+  Copyleft-Pflichten der AGPL nicht mit unserer gewuenschten MIT-Lizenzierung
+  vereinbar sind - unabhaengig davon, dass rein mathematische Ideen als
+  solche nicht unter die AGPL fallen.
+- **Was `fxroute` tatsaechlich ist (verifiziert aus dem README, nicht nur
+  behauptet):** laut eigener Beschreibung "a browser-based control surface
+  for a Linux hi-fi audio box" - eine Steuerungsoberflaeche fuer lokale
+  Musik/Streaming plus eine native DSP-Engine und Mess-Werkzeuge (u. a.
+  Einzel-Sweeps, "L/R Repeat", Mehrpositions-Workflows, "Speaker Auto
+  Alignment"). **Praezisierung gegenueber der urspruenglichen Annahme:**
+  das README beschreibt an keiner Stelle ein Verfahren, das einzelne,
+  ueberlappende Treiberantworten aus einer einzigen Summenmessung
+  trennt/extrahiert - auch keine Validierung, Grenzen oder Annahmen dazu.
+  Der Ausschluss von `fxroute` stuetzt sich also in erster Linie auf die
+  Lizenz; die folgende methodische Bewertung einer Summen-Trennung ist eine
+  eigenstaendige, von `fxroute` unabhaengige Einschaetzung und keine
+  Kritik an einem dort tatsaechlich beschriebenen Verfahren.
+- **Methodische Bewertung (Mehrwege-Trennung aus einer Summenmessung):** Auch
+  wenn eine Trennung ueberlappender Quellen unter idealisierten
+  Modellannahmen nicht pauschal unmoeglich ist, fehlt fuer unseren konkreten
+  Anwendungsfall (zwei stark ueberlappende Subwoofer im Bereich 20-300 Hz
+  unter realen Fahrzeug-Reflexionsbedingungen) ein validiertes
+  Trennverfahren aus einer einzelnen Summenmessung.
+- **Verbindliche Messstrategie (ab Fruehjahr 2027):** `Front-Sub`,
+  `Sitz-Sub` sowie `Tuer-MT L` und `Tuer-MT R` werden **einzeln** bei
+  stummgeschalteten Nachbarkanaelen gemessen. Zwischen den Messungen bleiben
+  Mikrofonposition und Fahrzeugzustand unveraendert; die akustische
+  Timing-Referenz (linker Hochtoener + REW `Adjust clock with acoustic ref`,
+  siehe Abschnitt 4) wird bei jeder Messung identisch verwendet, sodass alle
+  Wege auf dieselbe Zeitreferenz bezogen sind.
+
+---
+
 ## Grenzen (aus dem Auftrag, hier nochmals festgehalten)
 
 Keine Aenderung an der Mosconi-Hardware/-Software. Keine Aenderung an
@@ -404,3 +443,4 @@ von Fremdcode aus inkompatiblen Lizenzen (insbesondere: nichts aus
 - `pierreaubert/autoeq`/SotF: Paketdokumentation auf docs.rs/crate/autoeq (Lizenz-Header in `src/optim.rs`: GPLv3)
 - REW-Hilfedokumentation: https://www.roomeqwizard.com/betahelp/help/html/makingmeasurements.html
 - Praxisberichte zu "Acoustic Timing Reference" mit UMIK-1: avnirvana.com- und diyaudio.com-Forenthreads (siehe Recherche)
+- `CobbyCode/fxroute`: https://github.com/CobbyCode/fxroute (`LICENSE`: AGPL-3.0; `README.md`)
