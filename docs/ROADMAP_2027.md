@@ -291,6 +291,83 @@ Raum- oder Fahrzeugvalidierung; die Toleranzen sind Arbeitswerte.
    und im Report ausgewiesen - als Konsistenz-Check ohne automatisches
    Urteil. Ohne `lr` bleibt das Verhalten unveraendert.
 
+## Untersuchungsspezifikation: frequenzabhaengige Tieftonverteilung (Stufe A/B), Stand 2026-11-22
+
+Stand 22.11.2026, rein dokumentarisch: keine Messung, keine Simulation, keine Code-Aenderung, kein Hardwarekauf. Gilt ab Maerz 2027, vorher sind keine Messungen und Hoertests moeglich. Alle Pegel-, Phasen- und Hub-Aussagen sind Modellerwartungen, keine Messwerte. Kennzeichnung: **[Nutzer]**, **[Quelle]** (oeffentlich belegt), **[Modell]**, **[unverifiziert]**.
+
+### Verbindliche Rahmenbedingungen
+- Ein vorhandener Subwoofer: Saxx DS 120 DSP, geschlossen, vorne links in der Ecke **[Nutzer]**.
+- KEF LS50 Wireless Gen1 mit 5-cm-Basotect-Portstopfen (Ist-Zustand, feste Messbedingung) und 16 cm Rueckwandabstand (Gehaeuserueckseite) **[Nutzer]**.
+- Raum 5,72 x 3,72 x 2,40 m. Die rechnerische Breitenmode bei ca. 46 Hz (46,1 Hz) ist eine **Arbeitshypothese [Modell]**, nicht gemessen.
+- Kein zweiter Subwoofer. **Kein Hardwarekauf vor positivem Simulations- und Messnachweis** (siehe Offline-Nachweis).
+- Weiter gueltig: Messregeln und EQ-Regeln des Projekts (eine Variable pro Messung, keine Boosts in Einbrueche durch Ausloeschung, Cuts bevorzugt) und die Regel, dass der Portzustand innerhalb einer Kampagne nie gewechselt wird.
+
+### Zwei Zielstufen
+
+**Stufe A - ohne Hardwarekauf: optimierte 2.1-Integration.**
+- Saxx-PEQ: Ziel hoechstens 3 Baender, schmalbandig, Cuts vor Boosts. Der Ist-Stand sind 5 Baender (EQ1-EQ5); ob sich Baender entfernen lassen, entscheidet die Messung, nicht dieses Dokument.
+- Delay/Phase: Saxx-Phase in 45-Grad-Schritten ist belegt. Ob die Saxx-Software ein Delay bietet, ist **ungeklaert** (offener Punkt 6 in `raum_akustik.md`).
+- KEF-App-Weiche: Sub-Out-Tiefpass 40-250 Hz, Hochpass 50-120 Hz. Die Wertebereiche stammen aus Fremdcode (aiokef, kefctl) und sind fuer das eigene Geraet **[unverifiziert]**.
+- 2x2-Portvergleich offen vs. 5 cm Basotect (siehe Messplan).
+
+**Stufe B - nur nach Offline-Simulationsnachweis: echte 3-Quellen-MIMO-Verteilung.**
+- Quellen: KEF L, KEF R, Saxx. Zwei Eingangskanaele x drei Ausgaenge ergeben 6 FIR-Zweige (Zaehlung nach dem Auftrag, keine Messung).
+- Vorgesehene Werkzeuge: OptiMIMO und CamillaDSP. Die Werkzeugwahl ist **nicht verifiziert** (eine Websuche am 22.11.2026 fand zu OptiMIMO keinen Treffer, CamillaDSP wurde nicht geprueft). Sie bleibt offen, bis das Offline-Verfahren steht.
+- Hardware: ein einzelnes synchronisiertes Mehrkanal-Interface mit gemeinsamem Taktgeber. **Keine getrennten USB-DACs** wegen Clock-Drift.
+- Signalweg: PC -> Interface -> analoger KEF-Eingang (RCA) und Saxx separat. Laut KEF-Infoblatt hat die LS50 Wireless einen RCA-Analog-Line-Eingang und einen Subwoofer-Ausgang **[Quelle]**. Auf diesem Weg laufen DLNA, Bluetooth und TV-optisch nicht durch die FIR-Kette (gleiche Einschraenkung wie bei Equalizer APO).
+- Der Kauf des Interfaces gehoert zu Stufe B und ist erst nach dem Nachweis erlaubt.
+
+### Die vier Korrekturebenen (strikt getrennt zu berichten)
+
+| Ebene | Inhalt | Stufe |
+|---|---|---|
+| 1. Reine Saxx-PEQ-Korrektur | schmalbandige Eingriffe im Sub-Pfad im Saxx-Geraet | A |
+| 2. Konventionelle 2.1-Uebergangs-/Laufzeitoptimierung | Weichenfrequenzen, Sub-Pegel, Saxx-Phase/Delay, Portzustand | A |
+| 3. Unabhaengige frequenzabhaengige Filterung aller drei Quellen | je Quelle eigener Filter (KEF L != KEF R != Saxx), nicht per KEF-App moeglich (Einstellungen gelten fuer das Paar) | B |
+| 4. Echte Mehrpositions-MIMO-Optimierung | gemeinsame Filter ueber alle 11 Positionen, Kostenfunktion aus raeumlicher Streuung und Zielkurve unter Pegelgrenzen | B |
+
+Der Stufe-B-Nachweis weist Ebene 3 und Ebene 4 getrennt aus. Nur so ist erkennbar, ob ein Gewinn aus der Einzelquellen-Filterung oder aus der Mehrpositions-Optimierung stammt.
+
+### Verbindlicher REW-Messplan (Kampagne MIMO2703)
+
+**Rahmen.** Eigene Kampagne, Portzustand fest (siehe Reihenfolge), alle Einstellungen von KEF und Saxx fest und im Notes-Feld jeder Messung vermerkt, UMIK-1 90 Grad, gleiche Sweep-Einstellungen, gleiche Lautstaerke. Die Archivmessungen (Jan-Feb 2026) sind nicht verwendbar: Portzustand, Zeitreferenz und KEF-Lautstaerke fehlen.
+
+**33 Einzel-Impulsantworten.**
+- `MIMO_KL_P01` bis `MIMO_KL_P11` (KEF links allein), `MIMO_KR_P01` bis `MIMO_KR_P11` (KEF rechts allein), `MIMO_SAXX_P01` bis `MIMO_SAXX_P11` (Saxx allein).
+- 11 Positionen = Sofamitte plus 10 Wedelpunkte, Punktliste und Skizze vorab festlegen. Dieselbe Position traegt fuer alle drei Quellen dieselbe Nummer **[Vorschlag, konsistent zur Wedelserie]**.
+- **Gemeinsame akustische Zeitreferenz** fuer alle 33 Messungen, **identische Abtastrate** (Wert vorab festlegen und notieren), **keine Peak-Neuausrichtung** der Impulsantworten, **keine Pegelnormalisierung** (absolute Pegel bleiben erhalten).
+- Pro Datei dokumentieren: Uhrzeit, Lautstaerke, Portzustand, SNR, Stoergeraeusche.
+
+**Voraussetzungen, die vor Messbeginn zu klaeren sind (derzeit ungeloest):**
+1. **Saxx-Einzelmessung.** Laut Projektstand ist der Saxx allein nicht messbar (der PC haengt per USB an der KEF, der Saxx erhaelt sein Signal ueber den KEF-Sub-Out). Ein eigener Signalweg zum Saxx-Eingang ohne KEF-Treiber muss gefunden und geprueft werden.
+2. **Gemeinsame Zeitbasis.** Beim Weg USB -> KEF gibt es keine Loopback-Zeitreferenz (die Archivmessungen haben keine Timing-Referenz), die interne KEF-Latenz ist unbekannt. Das REW-Verfahren fuer die gemeinsame akustische Zeitreferenz zwischen KEF-Weg und Saxx-Weg ist vor Messbeginn zu testen. Ohne gemeinsame Zeitbasis ist eine komplexe Summe ueber drei Quellen nicht belastbar.
+3. **Kanaltrennung.** KEF L und KEF R muessen tatsaechlich einzeln angesteuert werden (Pruefung wie in Arbeitspaket 1).
+
+**2x2-Portvergleich A-D** (Faktoren **[Interpretation, bitte bestaetigen]**: System x Port):
+
+| | Stopfen ein | Port offen |
+|---|---|---|
+| KEF allein (Hochpass aus, Sub aus) | A | B |
+| KEF + Sub (Ist-Konfiguration) | C | D |
+
+- Je Zelle dieselben 11 Positionen, Normierung 400 Hz-2 kHz, 1/6 Oktave, RMS-Average, Streuung der Wiederholung als Unsicherheit. Dateinamen z. B. `PORT2703_A_P01`.
+- Bezug zu den Vormerkungen: B gegen A entspricht P2, D gegen C entspricht P3 (Abschnitt "Vergleichskampagne Portzustand"). P1 (Nahfeld, Dichtigkeit ueber 15 dB) bleibt vorgeschaltet. Ob Gen1 den Hochpass ganz abschalten laesst, ist **[unverifiziert]**.
+- Herstellerangabe zur Orientierung **[Quelle]**: Frequenzbereich 50 Hz-28 kHz (Bass Extension Standard) bzw. 61 Hz-28 kHz (weniger Bass). Die Messbedingung dieser Angabe ist unbekannt.
+
+**Reihenfolge:** P1, dann 2x2-Vergleich, danach Portzustand fuer MIMO2703 festlegen und nie mehr wechseln. Die 33 Impulsantworten entstehen vollstaendig in diesem einen Portzustand.
+
+### Offline-Nachweis vor einer Stufe-B-Entscheidung (zwingend)
+Aus den 33 realen Impulsantworten ist offline zu pruefen, ob eine simulierte MIMO-Loesung gegenueber der **optimierten** 2.1-Loesung (Stufe A) ueber **alle 11 Sitzpositionen** einen relevanten Mehrwert innerhalb der KEF-Hub- und Pegelreserven liefert.
+1. **Fairer Vergleich.** Die Stufe-A-Baseline wird aus denselben 33 Impulsantworten optimiert berechnet (Pegel, Phase/Delay, Weiche, hoechstens 3 PEQ-Baender), nicht als "Zustand wie jetzt".
+2. **Kennzahlen** ueber alle 11 Positionen: raeumliche Streuung (Std. ueber Positionen, gemittelt 30-150 Hz), Abweichung zur Hauskurve, unguenstigste Position, L/R-Gleichheit. Das Do-No-Harm-Statusmodell des Spatial Analyzers (SAFE/UNSAFE/INCONCLUSIVE, ab N >= 3) ist dafuer vorgesehen.
+3. **"Relevanter Mehrwert"** wird **vor** der Auswertung mit Schwellenwerten festgelegt (offen, Arbeitswerte, nicht erfunden): mindestens groesser als die Wiederholstreuung der Messung und stabil in einer Leave-one-position-out-Kreuzvalidierung. Mit 11 Positionen und langen FIR-Filtern ist Ueberanpassung das Hauptrisiko.
+4. **Hub-/Pegelreserven.** Der Hub ist wegen des internen Verstaerkers nicht messbar. Daher Nebenbedingungen als Modell: Boost-Grenze (Wert vorab festlegen), keine Boosts in Einbruechen, keine Anhebung unterhalb der KEF-Hochpass-Region, Preamp/Headroom gegen Clipping. Der Hub-Schutz der KEF-DSP ist unbekannt.
+5. **Signalweg-Pruefungen vor einem Kauf:** KEF-RCA-Latenzstabilitaet (konstante Laufzeit ueber Neustarts und Sitzungen, Wiederholstreuung vorab als Kriterium festlegen) und gemeinsame Lautstaerkeregelung ueber KEF, PC-Master und Saxx-Pegel. Welcher KEF-Lautsprecher die Eingaenge traegt, ist zu klaeren (Digital Trends nennt den rechten, das Projekt fuehrt den linken als Primary).
+
+**Entscheidungsregel:** Stufe B nur, wenn (a) der Mehrwert gegenueber optimierter Stufe A ueber alle 11 Positionen belegt ist, (b) die Loesung innerhalb der Reserven bleibt, (c) die RCA-Latenz stabil ist und (d) eine gemeinsame Lautstaerkeregelung loesbar ist. Andernfalls bleibt es bei Stufe A, und es wird nichts gekauft. Ein Offline-Simulationswerkzeug dafuer waere neuer Code und ist nicht Teil der laufenden Haertungsphase.
+
+Quellen: siehe `raum_akustik.md` Abschnitt 13 (KEF-Infoblatt, KEF-Spezifikationsseite, Digital-Trends-Review).
+
 ## Finaler Stand der Haertungsphase (Stand 2026-11-22)
 
 Prioritaeten 1-5 und 6 (Teil 1) sowie 7 abgeschlossen (siehe jeweilige
