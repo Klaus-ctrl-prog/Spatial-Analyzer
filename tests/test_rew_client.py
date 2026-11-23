@@ -92,6 +92,28 @@ class TestReadOnlyRewClientWithMockedTransport:
         assert result[0].is_sweep is True
         assert result[1].is_sweep is False
 
+    def test_list_measurements_supports_rew_540_dict_format(self, monkeypatch):
+        client = ReadOnlyRewClient()
+        fake_data = {
+            "1": {"uuid": "u1", "title": "Sofa L", "hasImpulseResponse": True},
+            "2": {"uuid": "u2", "title": "Sofa R", "hasImpulseResponse": False},
+            "3": {"title": "ohne uuid"},
+        }
+        monkeypatch.setattr(client, "_request", lambda path, raw=False: fake_data)
+        result = client.list_measurements()
+        # Dict-Schluessel (Index) wird nie als UUID verwendet.
+        assert [m.uuid for m in result] == ["u1", "u2"]
+        assert result[0].is_sweep is True
+        assert result[1].title == "Sofa R"
+
+    def test_list_measurements_supports_wrapped_dict_and_empty(self, monkeypatch):
+        client = ReadOnlyRewClient()
+        payloads = iter([{"measurements": {"1": {"uuid": "u9"}}}, {}, []])
+        monkeypatch.setattr(client, "_request", lambda path, raw=False: next(payloads))
+        assert [m.uuid for m in client.list_measurements()] == ["u9"]
+        assert client.list_measurements() == []
+        assert client.list_measurements() == []
+
     def test_get_measurement_meta_requires_uuid(self):
         client = ReadOnlyRewClient()
         with pytest.raises(ValueError):
