@@ -18,6 +18,7 @@ from spatial_analyzer.guided_session import (
     check_clipping,
     check_pretrigger_noise,
     detect_new_measurement,
+    load_manifest,
     main,
     parse_user_action,
     prompt_smart453_preset,
@@ -471,11 +472,11 @@ class TestRunGuidedSessionWithFakeClient:
         assert len(manifest.entries) == 0
         assert (tmp_path / "manifest.json").exists()
 
-    def test_skip_moves_to_next_step_without_entry(self, tmp_path):
+    def test_skip_is_logged_as_skipped_entry_without_detection(self, tmp_path):
         profile = PROFILES["wohnzimmer"]
         client = _FakeClient(measurements=[])
         # 22 Schritte (11 Positionen x L/R) - jeden ueberspringen, dann quit
-        inputs = iter(["s"] * 22 + ["q"])
+        inputs = iter(["s"] * 22)
 
         manifest = run_guided_session(
             profile,
@@ -488,7 +489,9 @@ class TestRunGuidedSessionWithFakeClient:
             input_fn=lambda _: next(inputs),
             print_fn=lambda _: None,
         )
-        assert len(manifest.entries) == 0
+        assert len(manifest.entries) == 22
+        assert all(e.status == "skipped" for e in manifest.entries)
+        assert all(e.uuid is None and e.detection_status is None for e in manifest.entries)
 
     def test_confirm_with_clean_measurement_detected_and_logged(self, tmp_path):
         profile = PROFILES["wohnzimmer"]
@@ -619,11 +622,234 @@ class TestRunGuidedSessionWithFakeClient:
 
 
 # ---------------------------------------------------------------------------
+# Auto-Save nach jedem Schritt & --resume
+# ---------------------------------------------------------------------------
+
+
+def _scripted_client(responses, uuids=("u1", "u2", "u3", "u4")):
+    """Fake-Client, dessen `list_measurements()` nacheinander die Eintraege
+    aus `responses` liefert (letzter Eintrag wiederholt sich), inkl. gueltiger
+    Frequenzgang-/Impulsantwort-Daten fuer alle `uuids`."""
+    freqs = np.linspace(20, 200, 10)
+    ir = np.concatenate([np.full(10, 1e-6), [0.5], np.zeros(20)])
+    client = _FakeClient(
+        measurements=[],
+        freq_responses={u: {"freq": freqs.tolist(), "spl": np.full(10, 70.0).tolist()} for u in uuids},
+        impulse_responses={u: ir for u in uuids},
+    )
+    state = {"n": 0}
+
+    def list_measurements():
+        idx = min(state["n"], len(responses) - 1)
+        state["n"] += 1
+        return [_meta(u) for u in responses[idx]]
+
+    client.list_measurements = list_measurements
+    return client
+
+
+def _run(profile, client, path, tmp_path, inputs, *, use_aba=False, resume=None, messages=None, **kwargs):
+    it = iter(inputs)
+    return run_guided_session(
+        profile,
+        use_aba=use_aba,
+        client=client,
+        manifest_path=path,
+        notes_dir=tmp_path / "notes",
+        kef_host=None,
+        dry_run=False,
+        input_fn=lambda _: next(it),
+        print_fn=(messages.append if messages is not None else (lambda _: None)),
+        resume_manifest=resume,
+        **kwargs,
+    )
+
+
+class TestAutoSave:
+    def test_manifest_is_written_after_every_completed_or_skipped_step(self, tmp_path):
+        path = tmp_path / "manifest.json"
+        client = _scripted_client([[], ["u1"], ["u1", "u2"]])
+        entries_seen_at_prompt = []
+        script = iter(["", "s", "", "q"])
+
+        def input_fn(_):
+            # Vor jeder Eingabe: wie viele Eintraege stehen bereits auf der Platte?
+            entries_seen_at_prompt.append(len(json.loads(path.read_text(encoding="utf-8"))["entries"]) if path.exists() else 0)
+            return next(script)
+
+        run_guided_session(
+            PROFILES["wohnzimmer"],
+            use_aba=False,
+            client=client,
+            manifest_path=path,
+            notes_dir=tmp_path / "notes",
+            kef_host=None,
+            dry_run=False,
+            input_fn=input_fn,
+            print_fn=lambda _: None,
+        )
+        # Schritt 1 (confirm), Schritt 2 (skip), Schritt 3 (confirm), dann q:
+        # direkt nach jedem Schritt ist der Stand bereits auf der Platte.
+        assert entries_seen_at_prompt == [0, 1, 2, 3]
+
+    def test_write_is_atomic_and_leaves_no_temp_file(self, tmp_path):
+        manifest = SessionManifest(profile="wohnzimmer", dry_run=False, created_at="t0")
+        path = tmp_path / "sub" / "manifest.json"
+        manifest.write(path)
+        assert path.exists()
+        assert not (tmp_path / "sub" / "manifest.json.tmp").exists()
+        assert json.loads(path.read_text(encoding="utf-8"))["profile"] == "wohnzimmer"
+
+    def test_manifest_stores_mode_and_conditions_for_resume(self, tmp_path):
+        path = tmp_path / "manifest.json"
+        _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+            use_aba=True, port_state="offen", signal_path="Bluetooth",
+        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["use_aba"] is True
+        assert data["port_state"] == "offen"
+        assert data["signal_path"] == "Bluetooth"
+
+
+class TestResume:
+    def test_quit_after_step_two_then_resume_continues_at_step_three_without_duplicates(self, tmp_path):
+        path = tmp_path / "manifest.json"
+        profile = PROFILES["wohnzimmer"]
+        # Session 1: Baseline [], nach Schritt 1 [u1], nach Schritt 2 [u1,u2].
+        # Session 2: Baseline [u1,u2], nach Schritt 3 [u1,u2,u3].
+        client = _scripted_client([[], ["u1"], ["u1", "u2"], ["u1", "u2"], ["u1", "u2", "u3"]])
+
+        _run(profile, client, path, tmp_path, ["", "", "q"])
+        first = load_manifest(path)
+        assert [e.measurement_name for e in first.entries] == ["P01_L", "P01_R"]
+
+        messages = []
+        resumed = _run(profile, client, path, tmp_path, ["", "q"], resume=first, messages=messages)
+
+        names = [e.measurement_name for e in resumed.entries]
+        assert names == ["P01_L", "P01_R", "P02_L"]  # fortgesetzt bei Schritt 3, keine Duplikate
+        assert resumed is first  # dieselbe, erweiterte Manifest-Instanz
+        assert [e.uuid for e in resumed.entries] == ["u1", "u2", "u3"]
+        assert any("2 von 22 Schritten bereits abgeschlossen" in m for m in messages)
+        assert any("Fortsetzung bei: P02_L" in m for m in messages)
+        assert not any("=== P01_L ===" in m or "=== P01_R ===" in m for m in messages)
+        # Auch der fortgesetzte Stand liegt sofort auf der Platte.
+        assert [e.measurement_name for e in load_manifest(path).entries] == names
+
+    def test_resume_offers_previously_skipped_step_again(self, tmp_path):
+        path = tmp_path / "manifest.json"
+        profile = PROFILES["wohnzimmer"]
+        client = _scripted_client([[], ["u1"]])
+
+        _run(profile, client, path, tmp_path, ["s", "q"])
+        first = load_manifest(path)
+        assert [e.status for e in first.entries] == ["skipped"]
+
+        messages = []
+        _run(profile, client, path, tmp_path, ["q"], resume=first, messages=messages)
+        assert any("0 von 22 Schritten bereits abgeschlossen" in m for m in messages)
+        assert any("=== P01_L ===" in m for m in messages)  # wird erneut angeboten
+
+    def test_resume_with_all_steps_completed_does_nothing_more(self, tmp_path):
+        path = tmp_path / "manifest.json"
+        profile = PROFILES["smart453"]
+        # Vollstaendige Dry-Run-Session erzeugen, dann fortsetzen.
+        run_guided_session(
+            profile, use_aba=False, client=_scripted_client([[]]), manifest_path=path,
+            notes_dir=tmp_path / "notes", kef_host=None, dry_run=True,
+            input_fn=lambda _: "", print_fn=lambda _: None,
+        )
+        first = load_manifest(path)
+        assert len(first.entries) == 9
+
+        messages = []
+        resumed = _run(profile, _scripted_client([[]]), path, tmp_path, [], resume=first, messages=messages)
+        assert len(resumed.entries) == 9
+        assert any("bereits abgeschlossen" in m for m in messages)
+
+    def test_old_manifest_without_status_field_counts_as_completed(self, tmp_path):
+        path = tmp_path / "old.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "profile": "wohnzimmer",
+                    "dry_run": False,
+                    "created_at": "t0",
+                    "entries": [
+                        {
+                            "measurement_name": "P01_L",
+                            "position_id": "P01",
+                            "channel": "L",
+                            "aba_state": None,
+                            "uuid": "u1",
+                            "detection_status": "ok",
+                            "qc_findings": [],
+                            "kef_snapshot": None,
+                            "smart453_preset": None,
+                            "notes_text": "x",
+                            "timestamp": "t1",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = load_manifest(path)
+        assert loaded.entries[0].status == "completed"
+        assert loaded.use_aba is False and loaded.port_state is None
+
+    def test_main_resume_takes_profile_mode_and_conditions_from_manifest(self, tmp_path, capsys):
+        path = tmp_path / "manifest.json"
+        # Unterbrochene A-B-A-Session (Bluetooth, Port offen) ohne einen Schritt.
+        _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+            use_aba=True, port_state="offen", signal_path="Bluetooth",
+        )
+
+        # Widerspruechliche CLI-Flags muessen von --resume uebersteuert werden.
+        exit_code = main(
+            ["--resume", str(path), "--dry-run", "--profile", "smart453",
+             "--port-state", "stopfen_ein", "--signal-path", "USB", "--notes-dir", str(tmp_path / "notes")]
+        )
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "Fortsetzung: 0 von 33 Schritten bereits abgeschlossen" in out
+
+        loaded = load_manifest(path)
+        assert loaded.profile == "wohnzimmer"
+        assert loaded.use_aba is True
+        assert loaded.port_state == "offen"
+        assert loaded.signal_path == "Bluetooth"
+        assert len(loaded.entries) == 33
+        assert loaded.entries[0].measurement_name == "ABA_A1_P01"
+
+    def test_main_resume_with_missing_manifest_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            main(["--resume", str(tmp_path / "gibt_es_nicht.json")])
+
+    def test_main_resume_with_unknown_profile_exits(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps({"profile": "unbekannt", "entries": []}), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path)])
+
+    def test_main_resume_with_corrupt_json_exits(self, tmp_path):
+        path = tmp_path / "corrupt.json"
+        path.write_text("{ nicht json", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path)])
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 class TestCli:
+    def test_parser_resume_default_is_none(self):
+        assert build_parser().parse_args([]).resume is None
+
     def test_parser_defaults(self):
         parser = build_parser()
         args = parser.parse_args([])

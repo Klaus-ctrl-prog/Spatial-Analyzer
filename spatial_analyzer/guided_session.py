@@ -40,6 +40,23 @@ Arbeitshypothesen, keine aus Messungen abgeleiteten Werte (Projektregel
 "keine Zahlen erfinden", docs/SPECIFICATION.md Abschnitt 2) - vor der ersten
 echten Kampagne ab März 2027 zu überprüfen (analog zum offenen Punkt 22 in
 `raum_akustik.md`).
+
+**Zwischenspeicher & Fortsetzung (`--resume`):** `session_manifest.json` wird
+nicht erst am Sessionende geschrieben, sondern nach JEDEM abgeschlossenen
+("bestätigt") oder übersprungenen Schritt atomar (Schreiben in eine
+Temp-Datei, danach `Path.replace`, siehe `SessionManifest.write`) neu
+geschrieben - ein Absturz oder Stromausfall mitten in der Kampagne verliert
+damit höchstens den gerade laufenden Schritt. `--resume <pfad>` liest dieses
+Manifest wieder ein, übernimmt Profil/Portzustand/Messweg/`--aba` daraus und
+überspringt jeden Schritt mit `status == "completed"`. Ein übersprungener
+("skip") Schritt gilt dabei bewusst NICHT als abgeschlossen (`status ==
+"skipped"`) und wird bei einem `--resume` erneut angeboten - "übersprungen"
+heißt hier "jetzt nicht gemessen", nicht "endgültig verzichtet". Eine
+A1/A2-Drift-Prüfung (Abschnitt 15.5) über die Grenze eines Resumes hinweg
+(z. B. A1 vor dem Abbruch, A2 erst danach) ist nicht möglich, da die dafür
+nötigen SPL-Rohdaten nur im Prozessspeicher zwischengehalten werden, nicht im
+Manifest - das wird bewusst ausgelassen statt eine Prüfung ohne
+Datengrundlage vorzutäuschen (Projektregel "keine Zahlen erfinden").
 """
 
 from __future__ import annotations
@@ -456,12 +473,17 @@ class SessionManifestEntry:
     channel: str | None
     aba_state: str | None
     uuid: str | None
-    detection_status: str
+    detection_status: str | None
     qc_findings: list[dict[str, str]]
     kef_snapshot: dict[str, Any] | None
     smart453_preset: str | None
     notes_text: str
     timestamp: str
+    # "completed" = bestaetigter, ausgewerteter Schritt; "skipped" = bewusst
+    # ausgelassen und bei --resume erneut anzubieten (siehe Modul-Docstring,
+    # Abschnitt "Zwischenspeicher & Fortsetzung"). Default haelt bestehende
+    # Aufrufstellen ohne `status=` rueckwaertskompatibel.
+    status: str = "completed"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -473,6 +495,11 @@ class SessionManifest:
     dry_run: bool
     created_at: str
     entries: list[SessionManifestEntry] = field(default_factory=list)
+    # Fuer --resume: Modus/Bedingungen der Session, damit eine Fortsetzung
+    # sie nicht erneut abfragen oder erraten muss.
+    use_aba: bool = False
+    port_state: str | None = None
+    signal_path: str | None = None
 
     def add(self, entry: SessionManifestEntry) -> None:
         self.entries.append(entry)
@@ -482,11 +509,57 @@ class SessionManifest:
             "profile": self.profile,
             "dry_run": self.dry_run,
             "created_at": self.created_at,
+            "use_aba": self.use_aba,
+            "port_state": self.port_state,
+            "signal_path": self.signal_path,
             "entries": [e.to_dict() for e in self.entries],
         }
 
     def write(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        """Schreibt das Manifest atomar: zuerst in eine Temp-Datei im selben
+        Verzeichnis, dann per `Path.replace` (= `os.replace`, atomarer
+        Rename) an den Zielpfad - ein Absturz mitten im Schreiben hinterlaesst
+        damit nie eine halb geschriebene/korrupte `session_manifest.json`."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = target.with_name(target.name + ".tmp")
+        tmp_path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(target)
+
+
+def load_manifest(path: str | Path) -> SessionManifest:
+    """Liest ein zuvor geschriebenes `session_manifest.json` fuer `--resume`
+    wieder ein. Fehlende Felder (z. B. `status` in einem vor dieser Funktion
+    geschriebenen Manifest) werden mit einem sinnvollen Default aufgefuellt:
+    ein Eintrag ohne `status`-Feld stammt aus einer Version, die nur
+    bestaetigte Schritte protokolliert hat, gilt also als "completed"."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    entries = [
+        SessionManifestEntry(
+            measurement_name=e["measurement_name"],
+            position_id=e["position_id"],
+            channel=e.get("channel"),
+            aba_state=e.get("aba_state"),
+            uuid=e.get("uuid"),
+            detection_status=e.get("detection_status"),
+            qc_findings=e.get("qc_findings", []),
+            kef_snapshot=e.get("kef_snapshot"),
+            smart453_preset=e.get("smart453_preset"),
+            notes_text=e.get("notes_text", ""),
+            timestamp=e.get("timestamp", ""),
+            status=e.get("status", "completed"),
+        )
+        for e in data.get("entries", [])
+    ]
+    return SessionManifest(
+        profile=data["profile"],
+        dry_run=data.get("dry_run", False),
+        created_at=data.get("created_at", _now_iso()),
+        entries=entries,
+        use_aba=data.get("use_aba", False),
+        port_state=data.get("port_state"),
+        signal_path=data.get("signal_path"),
+    )
 
 
 def _now_iso() -> str:
@@ -576,25 +649,72 @@ def run_guided_session(
     signal_path: str | None = "USB",
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
+    resume_manifest: SessionManifest | None = None,
 ) -> SessionManifest:
     """Führt eine komplette geführte Session über alle Positionen des
     Profils aus (oder bis `[q]` gedrückt wird) und schreibt dabei laufend
-    das Manifest, damit bei einem Abbruch nichts verloren geht."""
+    das Manifest, damit bei einem Abbruch nichts verloren geht.
+
+    `resume_manifest` (optional, siehe `load_manifest`/`--resume`): ein
+    zuvor geschriebenes Manifest, dessen bereits mit `status == "completed"`
+    markierte Schritte übersprungen werden; alle anderen Schritte (auch
+    zuvor übersprungene) laufen wie gewohnt. Die zurückgegebene
+    `SessionManifest`-Instanz ist in diesem Fall dieselbe (erweiterte)
+    Instanz wie `resume_manifest`, nicht eine neue."""
     qc_thresholds = qc_thresholds or QcThresholds()
-    manifest = SessionManifest(profile=profile.name, dry_run=dry_run, created_at=_now_iso())
     plan = build_plan(profile, use_aba)
 
-    known_uuids: set[str] = set()
+    if resume_manifest is not None:
+        manifest = resume_manifest
+        manifest.dry_run = dry_run
+        manifest.use_aba = use_aba
+        manifest.port_state = port_state
+        manifest.signal_path = signal_path
+        completed_keys = {
+            (e.position_id, e.channel, e.aba_state) for e in manifest.entries if e.status == "completed"
+        }
+        remaining = [s for s in plan if (s.position_id, s.channel, s.aba_state) not in completed_keys]
+        print_fn(f"Fortsetzung: {len(completed_keys)} von {len(plan)} Schritten bereits abgeschlossen.")
+        if remaining:
+            first = remaining[0]
+            first_name = build_measurement_name(profile, first.position_id, first.channel, first.aba_state)
+            print_fn(f"Fortsetzung bei: {first_name}")
+        else:
+            print_fn("Alle Schritte dieser Kampagne sind bereits abgeschlossen.")
+    else:
+        manifest = SessionManifest(
+            profile=profile.name,
+            dry_run=dry_run,
+            created_at=_now_iso(),
+            use_aba=use_aba,
+            port_state=port_state,
+            signal_path=signal_path,
+        )
+        completed_keys = set()
+
+    # Bereits aus dem Manifest bekannte UUIDs zusaetzlich zur frischen
+    # REW-Abfrage beruecksichtigen (robust, falls eine fruehere Messung aus
+    # der REW-Liste verschwunden sein sollte - sie bleibt dann trotzdem als
+    # "bekannt" markiert und wird nicht faelschlich erneut als "neu" erkannt).
+    known_uuids: set[str] = {e.uuid for e in manifest.entries if e.uuid}
     if not dry_run:
         try:
-            known_uuids = {m.uuid for m in client.list_measurements()}
+            known_uuids |= {m.uuid for m in client.list_measurements()}
         except RewApiError as exc:
             print_fn(f"WARNUNG: REW-API nicht erreichbar ({exc}) - IDs werden nicht automatisch erkannt.")
 
-    # Zwischenspeicher fuer die A1/A2-Drift-Pruefung je Position.
+    # Zwischenspeicher fuer die A1/A2-Drift-Pruefung je Position. Nach einem
+    # --resume mitten in einer A-B-A-Dreiergruppe ist dieser Cache leer (die
+    # SPL-Rohdaten eines vor dem Abbruch bestaetigten A1 liegen nicht im
+    # Manifest, nur sein Protokoll) - eine A2-Drift-Pruefung wird dann bewusst
+    # ausgelassen statt eine Pruefung ohne Datengrundlage vorzutaeuschen.
     aba_a1_cache: dict[str, dict[str, np.ndarray]] = {}
 
     for step in plan:
+        key = (step.position_id, step.channel, step.aba_state)
+        if key in completed_keys:
+            continue
+
         name = build_measurement_name(profile, step.position_id, step.channel, step.aba_state)
         print_fn(f"\n=== {name} ===")
 
@@ -610,6 +730,26 @@ def run_guided_session(
                 return manifest
 
             if action == UserAction.SKIP:
+                # Auch ein uebersprungener Schritt wird sofort protokolliert
+                # (Crash-/Abbruchsicherheit, siehe Modul-Docstring); er gilt
+                # bei --resume nicht als abgeschlossen und wird erneut angeboten.
+                manifest.add(
+                    SessionManifestEntry(
+                        measurement_name=name,
+                        position_id=step.position_id,
+                        channel=step.channel,
+                        aba_state=step.aba_state,
+                        uuid=None,
+                        detection_status=None,
+                        qc_findings=[],
+                        kef_snapshot=None,
+                        smart453_preset=None,
+                        notes_text="",
+                        timestamp=_now_iso(),
+                        status="skipped",
+                    )
+                )
+                manifest.write(manifest_path)
                 break
 
             if action == UserAction.REPEAT:
@@ -666,6 +806,7 @@ def run_guided_session(
                     smart453_preset=smart453_preset,
                     notes_text=notes_text,
                     timestamp=_now_iso(),
+                    status="completed",
                 )
             )
             manifest.write(manifest_path)
@@ -717,6 +858,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--manifest", default="session_manifest.json", help="Pfad fuer das Session-Manifest (JSON)")
     parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="MANIFEST_PFAD",
+        help=(
+            "Setzt eine unterbrochene Session fort: liest das angegebene session_manifest.json, "
+            "uebernimmt Profil, --aba, --port-state und --signal-path daraus (die entsprechenden "
+            "CLI-Flags werden ignoriert), ueberspringt Schritte mit status 'completed' und schreibt "
+            "weiter in dieselbe Datei (--manifest wird ignoriert)"
+        ),
+    )
+    parser.add_argument(
         "--notes-dir",
         default="session_notes",
         help="Verzeichnis fuer die erzeugten Notes-Textbloecke (.txt, manuell in REW einzufuegen)",
@@ -728,25 +880,46 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.aba and args.profile != "wohnzimmer":
+    resume_manifest: SessionManifest | None = None
+    if args.resume:
+        try:
+            resume_manifest = load_manifest(args.resume)
+        except (OSError, ValueError, KeyError) as exc:
+            parser.error(f"--resume: Manifest {args.resume!r} nicht lesbar ({exc})")
+        if resume_manifest.profile not in PROFILES:
+            parser.error(f"--resume: unbekanntes Profil {resume_manifest.profile!r} im Manifest")
+        profile_name = resume_manifest.profile
+        use_aba = resume_manifest.use_aba
+        port_state = resume_manifest.port_state or args.port_state
+        signal_path = resume_manifest.signal_path or args.signal_path
+        manifest_path = args.resume
+    else:
+        profile_name = args.profile
+        use_aba = args.aba
+        port_state = args.port_state
+        signal_path = args.signal_path
+        manifest_path = args.manifest
+
+    if use_aba and profile_name != "wohnzimmer":
         parser.error("--aba ist derzeit nur fuer --profile wohnzimmer spezifiziert")
 
-    profile = PROFILES[args.profile]
+    profile = PROFILES[profile_name]
     client = ReadOnlyRewClient(base_url=args.base_url)
 
     manifest = run_guided_session(
         profile,
-        use_aba=args.aba,
+        use_aba=use_aba,
         client=client,
-        manifest_path=args.manifest,
+        manifest_path=manifest_path,
         notes_dir=args.notes_dir,
         kef_host=args.kef_host,
         qc_thresholds=QcThresholds(),
         dry_run=args.dry_run,
-        port_state=args.port_state,
-        signal_path=args.signal_path,
+        port_state=port_state,
+        signal_path=signal_path,
+        resume_manifest=resume_manifest,
     )
-    print(f"Manifest geschrieben nach: {args.manifest} ({len(manifest.entries)} Eintraege)")
+    print(f"Manifest geschrieben nach: {manifest_path} ({len(manifest.entries)} Eintraege)")
     return 0
 
 
