@@ -63,7 +63,7 @@ class ReadOnlyRewClient:
 
     def list_measurements(self) -> list[RewMeasurementMeta]:
         data = self._request("/measurements")
-        items = data if isinstance(data, list) else data.get("measurements", [])
+        items = self._normalize_measurement_items(data)
         result = []
         for item in items:
             uuid = item.get("uuid") or item.get("id")
@@ -78,6 +78,23 @@ class ReadOnlyRewClient:
                 )
             )
         return result
+
+    @staticmethod
+    def _normalize_measurement_items(data: Any) -> list[dict[str, Any]]:
+        """Vereinheitlicht die `/measurements`-Antwort auf eine Liste von Dicts.
+
+        Unterstuetzt: Liste, `{"measurements": [...]}` und das von REW 5.40
+        beta 112 beobachtete Dictionary-Format `{"1": {...}, "2": {...}}`.
+        Der Dictionary-Schluessel ist ein veraenderlicher Index und wird nie
+        als UUID verwendet; Eintraege ohne `uuid`/`id` werden uebersprungen.
+        """
+        if isinstance(data, dict) and "measurements" in data:
+            data = data["measurements"]
+        if isinstance(data, dict):
+            data = list(data.values())
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
 
     def get_measurement_meta(self, uuid: str) -> dict[str, Any]:
         self._require_uuid(uuid)
