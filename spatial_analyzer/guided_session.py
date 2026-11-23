@@ -57,6 +57,22 @@ A1/A2-Drift-Prüfung (Abschnitt 15.5) über die Grenze eines Resumes hinweg
 nötigen SPL-Rohdaten nur im Prozessspeicher zwischengehalten werden, nicht im
 Manifest - das wird bewusst ausgelassen statt eine Prüfung ohne
 Datengrundlage vorzutäuschen (Projektregel "keine Zahlen erfinden").
+
+**Block-Auswahl (`--block 1..4`, nur Profil `wohnzimmer`):** bildet die vier
+Blöcke des Messplans aus raum_akustik.md Abschnitt 16 (Rev. 17) ab. Der Block
+legt Messfolge (L/R-Einzelmessung oder A1/B/A2) und Portzustand fest und gibt
+beim Start einen Hinweis auf den zugehörigen REW-Sweep-Bereich aus. Der
+Sweep-Bereich ist nur ein Hinweis: das Modul liest ihn nicht aus REW zurück
+und prüft ihn nicht. Widersprechen explizit gesetzte `--aba`/`--port-state`
+dem Block, bricht `main()` mit einer Fehlermeldung ab (statt still zu
+überschreiben). Ohne `--block` verhält sich das Modul wie zuvor.
+
+**Setup-Notiz (`--notes`):** freier Text (z. B. KEF-Phasenkorrektur EIN/AUS,
+KEF-HP, Saxx-LP, Saxx-Phase, Saxx-Pegelregler-Wert), wird im Manifest
+gespeichert und in jeden Notes-Entwurf übernommen. Ohne `--notes` fragt eine
+interaktive Session (kein `--dry-run`, kein `--resume`) einmal beim Start
+danach, `Enter` überspringt. Bei `--resume` bleibt die gespeicherte Notiz
+erhalten, ein neues `--notes` ersetzt sie.
 """
 
 from __future__ import annotations
@@ -129,6 +145,63 @@ PROFILES: dict[str, SessionProfile] = {
     "wohnzimmer": _wohnzimmer_profile(),
     "smart453": _smart453_profile(),
 }
+
+
+@dataclass(frozen=True)
+class BlockSpec:
+    """Ein Block des Wohnzimmer-Messplans (raum_akustik.md Abschnitt 16).
+
+    `sweep_hint` ist nur ein Hinweis fuer den manuell gestarteten REW-Sweep
+    und wird weder aus REW gelesen noch geprueft.
+    """
+
+    number: int
+    use_aba: bool
+    port_state: str
+    sweep_hint: str
+    description: str
+
+
+BLOCKS: dict[int, BlockSpec] = {
+    1: BlockSpec(
+        1,
+        False,
+        "stopfen_ein",
+        "20 Hz - 20.000 Hz",
+        "KEF allein (2.0, Sub-Out aus, Saxx AUS), L und R einzeln, Stopfen drin",
+    ),
+    2: BlockSpec(
+        2,
+        True,
+        "stopfen_ein",
+        "15 Hz - 500 Hz",
+        "A1/B/A2: A = KEF mit aktivem Hochpass, Saxx gemutet; B = KEF + Saxx aktiv; Stopfen drin",
+    ),
+    3: BlockSpec(
+        3,
+        True,
+        "offen",
+        "15 Hz - 500 Hz",
+        "A1/B/A2 wie Block 2, Stopfen entfernt (nach einmaligem Stopfen-Ziehen), gleiche Kombination wie Block 2",
+    ),
+    4: BlockSpec(
+        4,
+        False,
+        "offen",
+        "20 Hz - 20.000 Hz",
+        "KEF allein (2.0, Sub-Out aus, Saxx AUS), L und R einzeln, Stopfen entfernt",
+    ),
+}
+
+
+def resolve_block(profile: SessionProfile, block: int) -> BlockSpec:
+    """Liefert die Block-Vorgabe oder wirft `ValueError` (unbekannter Block
+    oder Profil ohne Block-Plan; Bloecke sind nur fuer `wohnzimmer` definiert)."""
+    if profile.name != "wohnzimmer":
+        raise ValueError(f"--block ist nur fuer das Profil 'wohnzimmer' definiert (nicht {profile.name!r})")
+    if block not in BLOCKS:
+        raise ValueError(f"Unbekannter Block {block!r} (erwartet 1-4)")
+    return BLOCKS[block]
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +494,15 @@ def prompt_smart453_preset(input_fn: Callable[[str], str] = input) -> str:
     return input_fn("Aktueller Mosconi-Preset-Name (manuell, kein automatisches Auslesen) > ").strip()
 
 
+def prompt_setup_notes(input_fn: Callable[[str], str] = input) -> str | None:
+    """Fragt einmal beim Start nach einer freien Setup-Notiz (KEF-Phasenkorrektur,
+    KEF-HP, Saxx-LP, Saxx-Phase, Saxx-Pegelregler). Leere Eingabe = keine Notiz."""
+    answer = input_fn(
+        "Setup-Notiz (KEF-Phasenkorrektur, KEF-HP, Saxx-LP, Saxx-Phase, Saxx-Pegelregler; Enter = ueberspringen): "
+    ).strip()
+    return answer or None
+
+
 # ---------------------------------------------------------------------------
 # Notes-Text (nur lokale Datei, kein REW-API-Write) & Manifest
 # ---------------------------------------------------------------------------
@@ -434,12 +516,16 @@ def build_notes_text(
     smart453_preset: str | None,
     port_state: str | None,
     signal_path: str | None,
+    block: int | None = None,
+    setup_notes: str | None = None,
 ) -> str:
     """Text-Entwurf im Stil von `docs/REW_NOTES_TEMPLATE.md` zum manuellen
     Einfuegen ins REW-Notes-Feld. Dieses Modul schreibt NICHT automatisch in
     REW (GET-only, siehe Modul-Docstring) - das Einfuegen bleibt wie bisher
     ein manueller Schritt."""
     lines = [f"Position: {position_id}"]
+    if block is not None:
+        lines.append(f"Block: {block}")
     if channel:
         lines.append(f"Kanal: {channel}")
     if aba_state:
@@ -455,6 +541,8 @@ def build_notes_text(
         lines.append("KEF-Snapshot: nicht verfuegbar - manuell nach REW_NOTES_TEMPLATE.md eintragen")
     if smart453_preset:
         lines.append(f"Mosconi-Preset: {smart453_preset}")
+    if setup_notes:
+        lines.append(f"Setup-Notiz: {setup_notes}")
     return "\n".join(lines)
 
 
@@ -500,6 +588,10 @@ class SessionManifest:
     use_aba: bool = False
     port_state: str | None = None
     signal_path: str | None = None
+    # Messplan-Block (1-4, nur Profil wohnzimmer) und freie Setup-Notiz
+    # (KEF-/Saxx-Einstellungen), beides optional und fuer --resume erhalten.
+    block: int | None = None
+    setup_notes: str | None = None
 
     def add(self, entry: SessionManifestEntry) -> None:
         self.entries.append(entry)
@@ -512,6 +604,8 @@ class SessionManifest:
             "use_aba": self.use_aba,
             "port_state": self.port_state,
             "signal_path": self.signal_path,
+            "block": self.block,
+            "setup_notes": self.setup_notes,
             "entries": [e.to_dict() for e in self.entries],
         }
 
@@ -559,6 +653,8 @@ def load_manifest(path: str | Path) -> SessionManifest:
         use_aba=data.get("use_aba", False),
         port_state=data.get("port_state"),
         signal_path=data.get("signal_path"),
+        block=data.get("block"),
+        setup_notes=data.get("setup_notes"),
     )
 
 
@@ -650,6 +746,9 @@ def run_guided_session(
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
     resume_manifest: SessionManifest | None = None,
+    block: int | None = None,
+    setup_notes: str | None = None,
+    ask_setup_notes: bool = False,
 ) -> SessionManifest:
     """Führt eine komplette geführte Session über alle Positionen des
     Profils aus (oder bis `[q]` gedrückt wird) und schreibt dabei laufend
@@ -660,8 +759,23 @@ def run_guided_session(
     markierte Schritte übersprungen werden; alle anderen Schritte (auch
     zuvor übersprungene) laufen wie gewohnt. Die zurückgegebene
     `SessionManifest`-Instanz ist in diesem Fall dieselbe (erweiterte)
-    Instanz wie `resume_manifest`, nicht eine neue."""
+    Instanz wie `resume_manifest`, nicht eine neue.
+
+    `block` (1-4, nur `wohnzimmer`, siehe `BLOCKS`): muss zu `use_aba` und
+    `port_state` passen (sonst `ValueError`) und gibt einen Sweep-Hinweis aus.
+    `setup_notes`: freie Notiz fuer Manifest und Notes-Entwuerfe; bei einem
+    Resume ersetzt ein uebergebener Wert die gespeicherte Notiz.
+    `ask_setup_notes`: fragt (nur wenn `setup_notes` fehlt und kein Resume
+    vorliegt) einmal per `input_fn` nach einer Notiz."""
     qc_thresholds = qc_thresholds or QcThresholds()
+    block_spec: BlockSpec | None = None
+    if block is not None:
+        block_spec = resolve_block(profile, block)
+        if use_aba != block_spec.use_aba or port_state != block_spec.port_state:
+            raise ValueError(
+                f"Block {block} verlangt use_aba={block_spec.use_aba} und port_state={block_spec.port_state!r} "
+                f"(erhalten: use_aba={use_aba}, port_state={port_state!r})"
+            )
     plan = build_plan(profile, use_aba)
 
     if resume_manifest is not None:
@@ -670,6 +784,9 @@ def run_guided_session(
         manifest.use_aba = use_aba
         manifest.port_state = port_state
         manifest.signal_path = signal_path
+        manifest.block = block
+        if setup_notes is not None:
+            manifest.setup_notes = setup_notes
         completed_keys = {
             (e.position_id, e.channel, e.aba_state) for e in manifest.entries if e.status == "completed"
         }
@@ -689,8 +806,19 @@ def run_guided_session(
             use_aba=use_aba,
             port_state=port_state,
             signal_path=signal_path,
+            block=block,
+            setup_notes=setup_notes,
         )
+        if manifest.setup_notes is None and ask_setup_notes:
+            manifest.setup_notes = prompt_setup_notes(input_fn)
         completed_keys = set()
+
+    if block_spec is not None:
+        print_fn(f"Block {block_spec.number}: {block_spec.description}")
+        print_fn(f"REW-Sweep-Hinweis: {block_spec.sweep_hint} (nur Hinweis, wird nicht geprueft)")
+        print_fn(f"Portzustand: {block_spec.port_state}")
+    if manifest.setup_notes:
+        print_fn(f"Setup-Notiz: {manifest.setup_notes}")
 
     # Bereits aus dem Manifest bekannte UUIDs zusaetzlich zur frischen
     # REW-Abfrage beruecksichtigen (robust, falls eine fruehere Messung aus
@@ -789,6 +917,8 @@ def run_guided_session(
                 smart453_preset,
                 port_state,
                 signal_path,
+                block,
+                manifest.setup_notes,
             )
             write_notes_sidecar(notes_dir, name, notes_text)
 
@@ -834,6 +964,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--aba",
         action="store_true",
         help="A-B-A-Folge mit Saxx-Mute statt L/R-Einzelmessung (nur Profil 'wohnzimmer')",
+    )
+    parser.add_argument(
+        "--block",
+        type=int,
+        choices=sorted(BLOCKS),
+        default=None,
+        help=(
+            "Messplan-Block 1-4 (nur Profil 'wohnzimmer', raum_akustik.md Abschnitt 16): legt Messfolge und "
+            "Portzustand fest (1: L/R, Stopfen ein; 2: A1/B/A2, Stopfen ein; 3: A1/B/A2, offen; 4: L/R, offen) "
+            "und gibt den REW-Sweep-Hinweis aus. Widerspruechliche --aba/--port-state brechen ab."
+        ),
+    )
+    parser.add_argument(
+        "--notes",
+        default=None,
+        help=(
+            "Freie Setup-Notiz (KEF-Phasenkorrektur, KEF-HP, Saxx-LP, Saxx-Phase, Saxx-Pegelregler), wird im "
+            "Manifest gespeichert und in die Notes-Entwuerfe uebernommen. Ohne --notes fragt eine interaktive "
+            "Session beim Start einmal nach (Enter = ueberspringen)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -893,12 +1043,28 @@ def main(argv: list[str] | None = None) -> int:
         port_state = resume_manifest.port_state or args.port_state
         signal_path = resume_manifest.signal_path or args.signal_path
         manifest_path = args.resume
+        block = resume_manifest.block
     else:
         profile_name = args.profile
         use_aba = args.aba
         port_state = args.port_state
         signal_path = args.signal_path
         manifest_path = args.manifest
+        block = args.block
+        if block is not None:
+            if profile_name != "wohnzimmer":
+                parser.error("--block ist nur fuer --profile wohnzimmer definiert")
+            spec = BLOCKS[block]
+            tokens = list(sys.argv[1:] if argv is None else argv)
+            port_explicit = any(t == "--port-state" or t.startswith("--port-state=") for t in tokens)
+            if args.aba and not spec.use_aba:
+                parser.error(f"--aba widerspricht --block {block} (Block {block} ist eine L/R-Einzelmessung)")
+            if port_explicit and args.port_state != spec.port_state:
+                parser.error(
+                    f"--port-state {args.port_state} widerspricht --block {block} (verlangt {spec.port_state})"
+                )
+            use_aba = spec.use_aba
+            port_state = spec.port_state
 
     if use_aba and profile_name != "wohnzimmer":
         parser.error("--aba ist derzeit nur fuer --profile wohnzimmer spezifiziert")
@@ -918,6 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
         port_state=port_state,
         signal_path=signal_path,
         resume_manifest=resume_manifest,
+        block=block,
+        setup_notes=args.notes,
+        ask_setup_notes=args.notes is None and resume_manifest is None and not args.dry_run,
     )
     print(f"Manifest geschrieben nach: {manifest_path} ({len(manifest.entries)} Eintraege)")
     return 0

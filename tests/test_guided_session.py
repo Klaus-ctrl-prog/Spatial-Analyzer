@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from spatial_analyzer.guided_session import (
+    BLOCKS,
     PROFILES,
     IdDetectionResult,
     QcThresholds,
@@ -21,9 +22,11 @@ from spatial_analyzer.guided_session import (
     load_manifest,
     main,
     parse_user_action,
+    prompt_setup_notes,
     prompt_smart453_preset,
     prompt_user_action,
     read_kef_snapshot,
+    resolve_block,
     run_guided_session,
     write_notes_sidecar,
 )
@@ -839,6 +842,253 @@ class TestResume:
         path.write_text("{ nicht json", encoding="utf-8")
         with pytest.raises(SystemExit):
             main(["--resume", str(path)])
+
+
+# ---------------------------------------------------------------------------
+# Block-Auswahl (--block 1..4) & Setup-Notiz (--notes)
+# ---------------------------------------------------------------------------
+
+_BLOCK_EXPECTED = {
+    1: {"steps": 22, "aba": False, "port": "stopfen_ein", "sweep": "20 Hz - 20.000 Hz", "first": "P01_L"},
+    2: {"steps": 33, "aba": True, "port": "stopfen_ein", "sweep": "15 Hz - 500 Hz", "first": "ABA_A1_P01"},
+    3: {"steps": 33, "aba": True, "port": "offen", "sweep": "15 Hz - 500 Hz", "first": "ABA_A1_P01"},
+    4: {"steps": 22, "aba": False, "port": "offen", "sweep": "20 Hz - 20.000 Hz", "first": "P01_L"},
+}
+
+
+class TestBlocks:
+    @pytest.mark.parametrize("block", [1, 2, 3, 4])
+    def test_run_with_block_uses_plan_port_state_and_sweep_hint(self, tmp_path, block):
+        exp = _BLOCK_EXPECTED[block]
+        messages = []
+        manifest = run_guided_session(
+            PROFILES["wohnzimmer"],
+            use_aba=exp["aba"],
+            client=_FakeClient(measurements=[]),
+            manifest_path=tmp_path / "m.json",
+            notes_dir=tmp_path / "notes",
+            kef_host=None,
+            dry_run=True,
+            port_state=exp["port"],
+            block=block,
+            input_fn=lambda _: "",
+            print_fn=messages.append,
+        )
+        assert len(manifest.entries) == exp["steps"]
+        assert manifest.entries[0].measurement_name == exp["first"]
+        assert manifest.block == block
+        assert manifest.port_state == exp["port"]
+        assert any(f"Block {block}:" in m for m in messages)
+        assert any("REW-Sweep-Hinweis: " + exp["sweep"] in m for m in messages)
+        data = json.loads((tmp_path / "m.json").read_text(encoding="utf-8"))
+        assert data["block"] == block and data["port_state"] == exp["port"] and data["use_aba"] is exp["aba"]
+        # Der Block steht in jedem Notes-Entwurf.
+        assert f"Block: {block}" in manifest.entries[0].notes_text
+
+    def test_blocks_table_matches_plan_in_raum_akustik_section_16(self):
+        assert {n: (b.use_aba, b.port_state, b.sweep_hint) for n, b in BLOCKS.items()} == {
+            1: (False, "stopfen_ein", "20 Hz - 20.000 Hz"),
+            2: (True, "stopfen_ein", "15 Hz - 500 Hz"),
+            3: (True, "offen", "15 Hz - 500 Hz"),
+            4: (False, "offen", "20 Hz - 20.000 Hz"),
+        }
+
+    def test_resolve_block_rejects_unknown_block_and_other_profile(self):
+        with pytest.raises(ValueError):
+            resolve_block(PROFILES["wohnzimmer"], 5)
+        with pytest.raises(ValueError):
+            resolve_block(PROFILES["smart453"], 1)
+
+    @pytest.mark.parametrize(
+        "block,use_aba,port",
+        [(1, True, "stopfen_ein"), (1, False, "offen"), (3, True, "stopfen_ein"), (2, False, "stopfen_ein")],
+    )
+    def test_run_rejects_settings_that_contradict_block(self, tmp_path, block, use_aba, port):
+        with pytest.raises(ValueError):
+            run_guided_session(
+                PROFILES["wohnzimmer"],
+                use_aba=use_aba,
+                client=_FakeClient(measurements=[]),
+                manifest_path=tmp_path / "m.json",
+                notes_dir=tmp_path / "notes",
+                kef_host=None,
+                dry_run=True,
+                port_state=port,
+                block=block,
+                input_fn=lambda _: "",
+                print_fn=lambda _: None,
+            )
+
+    def test_without_block_behaviour_is_unchanged(self, tmp_path):
+        manifest = run_guided_session(
+            PROFILES["wohnzimmer"],
+            use_aba=False,
+            client=_FakeClient(measurements=[]),
+            manifest_path=tmp_path / "m.json",
+            notes_dir=tmp_path / "notes",
+            kef_host=None,
+            dry_run=True,
+            input_fn=lambda _: "",
+            print_fn=lambda _: None,
+        )
+        assert manifest.block is None and manifest.setup_notes is None
+        assert "Block:" not in manifest.entries[0].notes_text
+        assert "Setup-Notiz" not in manifest.entries[0].notes_text
+
+    @pytest.mark.parametrize("block", [1, 2, 3, 4])
+    def test_main_block_sets_mode_and_port_state(self, tmp_path, capsys, block):
+        exp = _BLOCK_EXPECTED[block]
+        path = tmp_path / "m.json"
+        exit_code = main(
+            ["--block", str(block), "--dry-run", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
+        )
+        assert exit_code == 0
+        loaded = load_manifest(path)
+        assert loaded.block == block
+        assert loaded.port_state == exp["port"]
+        assert loaded.use_aba is exp["aba"]
+        assert len(loaded.entries) == exp["steps"]
+        assert "REW-Sweep-Hinweis: " + exp["sweep"] in capsys.readouterr().out
+
+    def test_main_block_accepts_matching_explicit_port_state(self, tmp_path):
+        exit_code = main(
+            ["--block", "3", "--port-state", "offen", "--aba", "--dry-run",
+             "--manifest", str(tmp_path / "m.json"), "--notes-dir", str(tmp_path / "n")]
+        )
+        assert exit_code == 0
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--block", "1", "--aba"],
+            ["--block", "3", "--port-state", "stopfen_ein"],
+            ["--block", "4", "--port-state=stopfen_ein"],
+            ["--block", "1", "--profile", "smart453"],
+            ["--block", "5"],
+        ],
+    )
+    def test_main_rejects_contradicting_or_invalid_block_flags(self, tmp_path, argv):
+        with pytest.raises(SystemExit):
+            main([*argv, "--dry-run", "--manifest", str(tmp_path / "m.json")])
+        assert not (tmp_path / "m.json").exists()
+
+    def test_parser_block_default_is_none(self):
+        args = build_parser().parse_args([])
+        assert args.block is None and args.notes is None
+
+
+class TestSetupNotes:
+    def test_build_notes_text_includes_block_and_setup_notes_only_when_given(self):
+        text = build_notes_text("P01", "L", None, None, None, "stopfen_ein", "USB", 1, "Phasenkorrektur EIN, Saxx-Pegel 0 dB")
+        assert "Block: 1" in text
+        assert "Setup-Notiz: Phasenkorrektur EIN, Saxx-Pegel 0 dB" in text
+        plain = build_notes_text("P01", "L", None, None, None, None, None)
+        assert "Block:" not in plain and "Setup-Notiz" not in plain
+
+    def test_prompt_setup_notes_enter_skips_and_text_is_stripped(self):
+        assert prompt_setup_notes(lambda _: "") is None
+        assert prompt_setup_notes(lambda _: "   ") is None
+        assert prompt_setup_notes(lambda _: "  KEF HP 90 Hz  ") == "KEF HP 90 Hz"
+
+    def test_notes_flag_is_saved_in_manifest_and_notes_sidecar(self, tmp_path):
+        path = tmp_path / "m.json"
+        note = "Phasenkorrektur AUS, KEF HP 90 Hz, Saxx LP 80 Hz, Phase 135, Pegelregler -3 dB"
+        exit_code = main(
+            ["--block", "2", "--notes", note, "--dry-run", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
+        )
+        assert exit_code == 0
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["setup_notes"] == note
+        assert f"Setup-Notiz: {note}" in data["entries"][0]["notes_text"]
+        sidecar = (tmp_path / "n" / "ABA_A1_P01.txt").read_text(encoding="utf-8")
+        assert f"Setup-Notiz: {note}" in sidecar
+
+    def test_interactive_start_asks_once_and_enter_skips(self, tmp_path):
+        prompts = []
+        script = iter(["", "q"])  # Notiz: Enter, danach sofort Quit
+
+        def input_fn(prompt):
+            prompts.append(prompt)
+            return next(script)
+
+        manifest = run_guided_session(
+            PROFILES["wohnzimmer"],
+            use_aba=False,
+            client=_scripted_client([[]]),
+            manifest_path=tmp_path / "m.json",
+            notes_dir=tmp_path / "notes",
+            kef_host=None,
+            dry_run=False,
+            input_fn=input_fn,
+            print_fn=lambda _: None,
+            ask_setup_notes=True,
+        )
+        assert manifest.setup_notes is None
+        assert sum("Setup-Notiz" in p for p in prompts) == 1
+
+    def test_interactive_start_stores_typed_note(self, tmp_path):
+        manifest = _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), tmp_path / "m.json", tmp_path,
+            ["Saxx-Pegel 0 dB", "q"], ask_setup_notes=True,
+        )
+        assert manifest.setup_notes == "Saxx-Pegel 0 dB"
+        assert json.loads((tmp_path / "m.json").read_text(encoding="utf-8"))["setup_notes"] == "Saxx-Pegel 0 dB"
+
+    def test_given_notes_skip_the_prompt(self, tmp_path):
+        # Nur ein Eintrag im Skript (Quit): ein Prompt wuerde StopIteration ausloesen.
+        manifest = _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), tmp_path / "m.json", tmp_path,
+            ["q"], setup_notes="vorab gesetzt", ask_setup_notes=True,
+        )
+        assert manifest.setup_notes == "vorab gesetzt"
+
+    def test_old_manifest_without_block_and_notes_loads_with_defaults(self, tmp_path):
+        path = tmp_path / "old.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "entries": []}), encoding="utf-8")
+        loaded = load_manifest(path)
+        assert loaded.block is None and loaded.setup_notes is None
+
+    def test_resume_keeps_block_and_notes_and_new_notes_replace_them(self, tmp_path, capsys):
+        path = tmp_path / "m.json"
+        _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+            use_aba=True, port_state="offen", block=3, setup_notes="Stand 1",
+        )
+        assert load_manifest(path).block == 3
+
+        # Resume ohne --notes: Block und Notiz bleiben erhalten.
+        assert main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")]) == 0
+        loaded = load_manifest(path)
+        assert loaded.block == 3 and loaded.setup_notes == "Stand 1"
+        assert loaded.port_state == "offen" and loaded.use_aba is True
+        assert len(loaded.entries) == 33
+        assert "Block: 3" in loaded.entries[0].notes_text
+        assert "Setup-Notiz: Stand 1" in loaded.entries[0].notes_text
+        assert "REW-Sweep-Hinweis: 15 Hz - 500 Hz" in capsys.readouterr().out
+
+    def test_resume_with_new_notes_replaces_stored_note(self, tmp_path):
+        path = tmp_path / "m.json"
+        _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+            use_aba=True, port_state="stopfen_ein", block=2, setup_notes="alt",
+        )
+        main(["--resume", str(path), "--notes", "neu", "--dry-run", "--notes-dir", str(tmp_path / "n")])
+        assert load_manifest(path).setup_notes == "neu"
+
+    def test_resume_continues_block_without_duplicates(self, tmp_path):
+        path = tmp_path / "m.json"
+        profile = PROFILES["wohnzimmer"]
+        # Session 1: Block 1, zwei Schritte bestaetigt, dann Quit.
+        _run(
+            profile, _scripted_client([[], ["u1"], ["u1", "u2"]]), path, tmp_path, ["", "", "q"],
+            port_state="stopfen_ein", block=1, setup_notes="Phasenkorrektur EIN",
+        )
+        assert [e.measurement_name for e in load_manifest(path).entries] == ["P01_L", "P01_R"]
+        # Session 2 per --resume (Dry-Run): Rest von Block 1, keine Duplikate.
+        main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")])
+        names = [e.measurement_name for e in load_manifest(path).entries]
+        assert len(names) == 22 and len(set(names)) == 22
+        assert names[:3] == ["P01_L", "P01_R", "P02_L"]
 
 
 # ---------------------------------------------------------------------------
