@@ -59,6 +59,8 @@ class Report:
     room_dimensions_m: tuple[float, float, float] | None
     measurement_summary: dict[str, Any] = field(default_factory=dict)
     mode_confirmations: list[ModeConfirmation] = field(default_factory=list)
+    mode_confirmations_l: list[ModeConfirmation] | None = None
+    mode_confirmations_r: list[ModeConfirmation] | None = None
     sub_optimizer_result: SubOptimizerResult | None = None
     eq_proposals_l: list[EqProposal] = field(default_factory=list)
     eq_proposals_r: list[EqProposal] = field(default_factory=list)
@@ -85,6 +87,14 @@ class Report:
                         "q_factor": c.q_factor,
                     }
                     for c in self.mode_confirmations
+                ],
+                "mode_confirmations_l": [
+                    {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
+                    for c in (self.mode_confirmations_l if self.mode_confirmations_l is not None else self.mode_confirmations)
+                ],
+                "mode_confirmations_r": [
+                    {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
+                    for c in (self.mode_confirmations_r if self.mode_confirmations_r is not None else self.mode_confirmations)
                 ],
                 "sub_optimizer": (
                     {
@@ -177,15 +187,18 @@ def render_html(report: Report) -> str:
     Templating, kein externes Template-Framework)."""
     e = html.escape
 
-    def mode_rows() -> str:
+    def mode_rows(confirmations: list[ModeConfirmation]) -> str:
         rows = []
-        for c in report.mode_confirmations:
+        for c in confirmations:
             decay = "unbekannt" if c.decay_confirmed is None else ("ja" if c.decay_confirmed else "nein")
             rows.append(
                 f"<tr><td>{c.freq_hz:.1f} Hz</td><td>{e(c.classification)}</td>"
                 f"<td>{decay}</td><td>{'' if c.q_factor is None else f'{c.q_factor:.2f}'}</td></tr>"
             )
         return "\n".join(rows) or "<tr><td colspan='4'><em>keine</em></td></tr>"
+
+    confirmations_l = report.mode_confirmations_l if report.mode_confirmations_l is not None else report.mode_confirmations
+    confirmations_r = report.mode_confirmations_r if report.mode_confirmations_r is not None else report.mode_confirmations
 
     def proposal_rows(proposals: list[EqProposal]) -> str:
         rows = []
@@ -267,12 +280,16 @@ Abschnitt "Hinweise" unten dafuer.</em></p>
 {measurement_note_rows()}
 </table>
 
-<h2>Modellannahmen: Bestaetigte Modenkandidaten</h2>
-<div class="model-banner">Alle Werte in diesem Abschnitt sind Modellbewertungen
-(raeumliche Konsistenz + Abklinganalyse), keine direkten Messwerte.</div>
+<h2>Modellannahmen: Bestaetigte Modenkandidaten L</h2>
+<div class="model-banner">Kanalgetrennte Modellbewertungen, keine direkten Messwerte.</div>
 <table>
 <tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>
-{mode_rows()}
+{mode_rows(confirmations_l)}
+</table>
+<h2>Modellannahmen: Bestaetigte Modenkandidaten R</h2>
+<table>
+<tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>
+{mode_rows(confirmations_r)}
 </table>
 
 <h2>Modellannahmen: Subwoofer-Optimierung</h2>

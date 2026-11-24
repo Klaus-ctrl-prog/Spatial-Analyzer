@@ -881,6 +881,11 @@ def run_guided_session(
                 break
 
             if action == UserAction.REPEAT:
+                if not dry_run:
+                    try:
+                        known_uuids = {m.uuid for m in client.list_measurements()}
+                    except RewApiError as exc:
+                        print_fn(f"WARNUNG: REW-Messungsliste nach Wiederholung nicht abrufbar ({exc}); UUID-Ausgangsstand bleibt unveraendert.")
                 continue
 
             # action == CONFIRM
@@ -997,7 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port-state",
         default="stopfen_ein",
-        choices=["stopfen_ein", "offen"],
+        choices=["stopfen_ein", "teilstopfen", "offen"],
         help="KEF-Bassreflex-Portzustand fuer das Notes-Protokoll (Standard: stopfen_ein, siehe raum_akustik.md Abschnitt 3)",
     )
     parser.add_argument(
