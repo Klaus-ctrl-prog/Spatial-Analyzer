@@ -111,8 +111,16 @@ def spread_metrics(values_db: np.ndarray) -> SpreadMetrics:
     """Streuungsmasse je Frequenzbin ueber alle Positionen (Zeilen), NaN-sicher."""
     values_db = _validate_matrix(values_db)
     n_valid = np.sum(~np.isnan(values_db), axis=0)
+    # Die Stichproben-Standardabweichung ist erst ab zwei gueltigen Werten
+    # definiert. Solche Bins bleiben NaN; nanstd wird nur darauf angewendet,
+    # damit NumPy keine Degrees-of-freedom-RuntimeWarning ausgibt.
+    std_db = np.full(values_db.shape[1], np.nan, dtype=np.float64)
+    has_sample_std = n_valid >= 2
+    if np.any(has_sample_std):
+        std_db[has_sample_std] = np.nanstd(
+            values_db[:, has_sample_std], axis=0, ddof=1
+        )
     with np.errstate(invalid="ignore"):
-        std_db = np.nanstd(values_db, axis=0, ddof=1)
         min_db = np.nanmin(values_db, axis=0)
         max_db = np.nanmax(values_db, axis=0)
     # nanstd mit ddof=1 liefert NaN, wenn pro Bin nur 1 gueltiger Wert vorliegt
