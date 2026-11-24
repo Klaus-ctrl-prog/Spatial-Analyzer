@@ -440,6 +440,16 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         )
     reference_ir_l = reference_position.get("l", {}).get("impulse_response")
     reference_ir_r = reference_position.get("r", {}).get("impulse_response")
+    missing_ir_channels = [
+        channel.upper()
+        for channel, reference_ir in (("l", reference_ir_l), ("r", reference_ir_r))
+        if reference_ir is None
+    ]
+    if missing_ir_channels:
+        notes.append(
+            "Keine Referenz-Impulsantwort vorhanden fuer Kanal/Kanaele "
+            f"{', '.join(missing_ir_channels)}; Abklinganalyse fuer diese Kanaele uebersprungen."
+        )
     confirmations_l = _confirm_mode_candidates(
         l_data.freq_hz, averaged_l, l_data.spl_db, room, reference_ir_l
     )
