@@ -89,14 +89,20 @@ class Report:
                     }
                     for c in self.mode_confirmations
                 ],
-                "mode_confirmations_l": [
-                    {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
-                    for c in (self.mode_confirmations_l if self.mode_confirmations_l is not None else self.mode_confirmations)
-                ],
-                "mode_confirmations_r": [
-                    {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
-                    for c in (self.mode_confirmations_r if self.mode_confirmations_r is not None else self.mode_confirmations)
-                ],
+                "mode_confirmations_l": (
+                    [
+                        {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
+                        for c in self.mode_confirmations_l
+                    ]
+                    if self.mode_confirmations_l is not None else None
+                ),
+                "mode_confirmations_r": (
+                    [
+                        {"freq_hz": c.freq_hz, "classification": c.classification, "decay_confirmed": c.decay_confirmed, "q_factor": c.q_factor}
+                        for c in self.mode_confirmations_r
+                    ]
+                    if self.mode_confirmations_r is not None else None
+                ),
                 "sub_optimizer": (
                     {
                         "best_gain_db": self.sub_optimizer_result.best_gain_db,
@@ -198,8 +204,24 @@ def render_html(report: Report) -> str:
             )
         return "\n".join(rows) or "<tr><td colspan='4'><em>keine</em></td></tr>"
 
-    confirmations_l = report.mode_confirmations_l if report.mode_confirmations_l is not None else report.mode_confirmations
-    confirmations_r = report.mode_confirmations_r if report.mode_confirmations_r is not None else report.mode_confirmations
+    if report.mode_confirmations_l is None or report.mode_confirmations_r is None:
+        mode_sections_html = (
+            "<h2>Modellannahmen: Bestaetigte Modenkandidaten</h2>"
+            '<div class="model-banner">Alle Werte in diesem Abschnitt sind Modellbewertungen '
+            "(raeumliche Konsistenz + Abklinganalyse), keine direkten Messwerte.</div>"
+            "<table><tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>"
+            f"{mode_rows(report.mode_confirmations)}</table>"
+        )
+    else:
+        mode_sections_html = (
+            "<h2>Modellannahmen: Bestaetigte Modenkandidaten L</h2>"
+            '<div class="model-banner">Kanalgetrennte Modellbewertungen, keine direkten Messwerte.</div>'
+            "<table><tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>"
+            f"{mode_rows(report.mode_confirmations_l)}</table>"
+            "<h2>Modellannahmen: Bestaetigte Modenkandidaten R</h2>"
+            "<table><tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>"
+            f"{mode_rows(report.mode_confirmations_r)}</table>"
+        )
 
     def proposal_rows(proposals: list[EqProposal]) -> str:
         rows = []
@@ -281,17 +303,7 @@ Abschnitt "Hinweise" unten dafuer.</em></p>
 {measurement_note_rows()}
 </table>
 
-<h2>Modellannahmen: Bestaetigte Modenkandidaten L</h2>
-<div class="model-banner">Kanalgetrennte Modellbewertungen, keine direkten Messwerte.</div>
-<table>
-<tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>
-{mode_rows(confirmations_l)}
-</table>
-<h2>Modellannahmen: Bestaetigte Modenkandidaten R</h2>
-<table>
-<tr><th>Frequenz</th><th>Klassifikation</th><th>Abkling-bestaetigt</th><th>Q</th></tr>
-{mode_rows(confirmations_r)}
-</table>
+{mode_sections_html}
 
 <h2>Modellannahmen: Subwoofer-Optimierung</h2>
 <div class="model-banner">70/30-Zielfunktion ist eine bewusst gewaehlte

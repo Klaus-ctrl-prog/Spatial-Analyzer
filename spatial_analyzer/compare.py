@@ -237,7 +237,12 @@ def _match_mode_comparisons(
     return comparisons
 
 
-def run_compare(before_dir: str | Path, after_dir: str | Path, output_dir: str | Path, align_band_hz: tuple[float, float] | None = DEFAULT_ALIGN_BAND_HZ) -> CompareReport:
+def run_compare(
+    before_dir: str | Path,
+    after_dir: str | Path,
+    output_dir: str | Path,
+    align_band_hz: tuple[float, float] | None = DEFAULT_ALIGN_BAND_HZ,
+) -> CompareReport:
     before_dir = Path(before_dir)
     after_dir = Path(after_dir)
     output_dir = Path(output_dir)
@@ -260,7 +265,9 @@ def run_compare(before_dir: str | Path, after_dir: str | Path, output_dir: str |
             continue
         try:
             deltas[channel] = _compute_curve_delta(
-                _read_frequency_table(before_csv), _read_frequency_table(after_csv), align_band_hz=align_band_hz
+                _read_frequency_table(before_csv),
+                _read_frequency_table(after_csv),
+                align_band_hz=align_band_hz,
             )
         except ValueError as exc:
             notes.append(f"Kanal '{channel}': Delta-Kurve uebersprungen ({exc}).")

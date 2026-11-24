@@ -1133,3 +1133,14 @@ def test_port_state_parser_accepts_teilstopfen():
 
     args = build_parser().parse_args(["--port-state", "teilstopfen"])
     assert args.port_state == "teilstopfen"
+
+
+def test_repeat_refreshes_known_rew_uuids_before_next_confirmation(tmp_path):
+    client = _scripted_client([[], ["old"], ["old", "new"]], uuids=("old", "new"))
+    manifest = _run(
+        PROFILES["wohnzimmer"], client, tmp_path / "manifest.json", tmp_path,
+        ["r", "", "q"],
+    )
+    assert len(manifest.entries) == 1
+    assert manifest.entries[0].uuid == "new"
+    assert manifest.entries[0].detection_status == "ok"
