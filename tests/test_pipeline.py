@@ -474,3 +474,15 @@ class TestRunPipelineReleaseMarking:
         assert report.do_no_harm.status.value == "INCONCLUSIVE"
         assert (tmp_path / "out" / "NICHT_FREIGEGEBEN.txt").exists()
         assert any("INCONCLUSIVE" in n for n in report.notes)
+
+
+def test_pipeline_report_exports_channel_specific_mode_confirmation_keys(tmp_path):
+    positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+    positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+    _write_input(tmp_path / "in.json", positions)
+    run_pipeline(tmp_path / "in.json", tmp_path / "out")
+    data = json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
+    assumptions = data["modellannahmen"]
+    assert "mode_confirmations" in assumptions
+    assert "mode_confirmations_l" in assumptions
+    assert "mode_confirmations_r" in assumptions

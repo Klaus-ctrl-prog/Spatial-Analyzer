@@ -1126,3 +1126,10 @@ class TestCli:
         captured = capsys.readouterr()
         assert "Manifest geschrieben" in captured.out
         assert (tmp_path / "m.json").exists()
+
+
+def test_port_state_parser_accepts_teilstopfen():
+    from spatial_analyzer.guided_session import build_parser
+
+    args = build_parser().parse_args(["--port-state", "teilstopfen"])
+    assert args.port_state == "teilstopfen"

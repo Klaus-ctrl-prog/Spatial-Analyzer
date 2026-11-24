@@ -124,3 +124,16 @@ class TestRunCompare:
         assert report.delta_l is None
         assert report.delta_r is not None
         assert any("frequency_table_l.csv" in n for n in report.notes)
+
+
+def test_custom_alignment_band_and_disabled_alignment(tmp_path):
+    from spatial_analyzer.compare import _compute_curve_delta
+
+    freq = np.linspace(15.0, 300.0, 300)
+    before = {"freq_hz": freq, "averaged_spl_db": np.full_like(freq, 70.0)}
+    after = {"freq_hz": freq, "averaged_spl_db": np.full_like(freq, 76.0)}
+    aligned = _compute_curve_delta(before, after, align_band_hz=(20.0, 200.0))
+    assert aligned.alignment_shift_db == pytest.approx(-6.0, abs=0.1)
+    unaligned = _compute_curve_delta(before, after, align_band_hz=None)
+    assert unaligned.alignment_shift_db == 0.0
+    assert np.nanmean(unaligned.delta_db) == pytest.approx(6.0, abs=0.1)
