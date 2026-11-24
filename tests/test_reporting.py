@@ -152,4 +152,5 @@ def test_channel_specific_mode_confirmations_keep_legacy_field_and_html(tmp_path
     assert assumptions["mode_confirmations_l"][0]["freq_hz"] == 48.0
     assert assumptions["mode_confirmations_r"][0]["freq_hz"] == 63.0
     html = reporting.render_html(report)
+    assert "Modenkandidaten L" in html and "Modenkandidaten R" in html
     assert "48.0 Hz" in html and "63.0 Hz" in html

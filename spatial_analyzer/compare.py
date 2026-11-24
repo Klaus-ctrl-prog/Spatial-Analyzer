@@ -391,9 +391,11 @@ th, td {{ border: 1px solid #ccc; padding: 4px 8px; text-align: left; }}
 </table>
 
 <h2>Delta-Kurven (Referenzband: {e(str(report.align_band_hz)) if report.align_band_hz is not None else "keine Angleichung (0 dB Verschiebung)"})</h2>
-<div class="model-banner">Die Nachher-Kurve wurde auf den Referenzpegel der
-Vorher-Kurve verschoben (analog REW "Align SPL") - Unterschiede im
-Referenzband selbst sind dadurch per Definition nahe 0 dB.</div>
+<div class="model-banner">{(
+    f'Die Nachher-Kurve wurde im Band {report.align_band_hz[0]:g}-{report.align_band_hz[1]:g} Hz auf den Referenzpegel der Vorher-Kurve verschoben (analog REW "Align SPL").'
+    if report.align_band_hz is not None
+    else 'Keine Pegelangleichung: Die Delta-Kurve zeigt die unveraenderte Pegeldifferenz.'
+)}</div>
 {delta_block("L", report.delta_l)}
 {delta_block("R", report.delta_r)}
 
