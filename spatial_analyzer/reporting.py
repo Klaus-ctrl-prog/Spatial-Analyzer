@@ -59,8 +59,6 @@ class Report:
     room_dimensions_m: tuple[float, float, float] | None
     measurement_summary: dict[str, Any] = field(default_factory=dict)
     mode_confirmations: list[ModeConfirmation] = field(default_factory=list)
-    mode_confirmations_l: list[ModeConfirmation] | None = None
-    mode_confirmations_r: list[ModeConfirmation] | None = None
     sub_optimizer_result: SubOptimizerResult | None = None
     eq_proposals_l: list[EqProposal] = field(default_factory=list)
     eq_proposals_r: list[EqProposal] = field(default_factory=list)
@@ -72,6 +70,9 @@ class Report:
     # Dritte Pruefebene: reale L+R-Summenmessung vs. komplexe Vorhersage
     # (None, wenn keine `lr`-Messung an sofa_mitte mitgegeben wurde).
     lr_sum_check: dict[str, Any] | None = None
+    # Optional channel-specific confirmations; appended to preserve positional constructor compatibility.
+    mode_confirmations_l: list[ModeConfirmation] | None = None
+    mode_confirmations_r: list[ModeConfirmation] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

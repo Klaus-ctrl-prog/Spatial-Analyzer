@@ -572,7 +572,7 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
             "l_spread_db_mean": float(np.nanmean(spread_l.std_db)),
             "r_spread_db_mean": float(np.nanmean(spread_r.std_db)),
         },
-        mode_confirmations=confirmations_l + confirmations_r,
+        mode_confirmations=confirmations_l,
         mode_confirmations_l=confirmations_l,
         mode_confirmations_r=confirmations_r,
         sub_optimizer_result=sub_result,

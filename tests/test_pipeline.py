@@ -486,3 +486,25 @@ def test_pipeline_report_exports_channel_specific_mode_confirmation_keys(tmp_pat
     assert "mode_confirmations" in assumptions
     assert "mode_confirmations_l" in assumptions
     assert "mode_confirmations_r" in assumptions
+
+
+def test_pipeline_uses_each_channels_own_reference_impulse_response(tmp_path, monkeypatch):
+    from spatial_analyzer import pipeline
+
+    positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+    positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+    positions[0]["l"]["impulse_response"] = {"samples": [0.0, 1.0, 0.0], "sample_interval_s": 1e-4}
+    positions[0]["r"]["impulse_response"] = {"samples": [0.0, 2.0, 0.0], "sample_interval_s": 1e-4}
+    seen = []
+
+    def fake_confirm(freq, averaged, positions_spl, room, reference_ir):
+        seen.append(reference_ir)
+        return []
+
+    monkeypatch.setattr(pipeline, "_confirm_mode_candidates", fake_confirm)
+    _write_input(tmp_path / "in.json", positions)
+    pipeline.run_pipeline(tmp_path / "in.json", tmp_path / "out")
+
+    assert len(seen) == 2
+    assert seen[0]["samples"] == [0.0, 1.0, 0.0]
+    assert seen[1]["samples"] == [0.0, 2.0, 0.0]
