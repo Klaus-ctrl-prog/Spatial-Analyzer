@@ -93,7 +93,10 @@ class TestRunPipeline:
 
         report = run_pipeline(input_path, tmp_path / "out")
         assert any("Impulsantwort" in n for n in report.notes)
+        ir_note = next(n for n in report.notes if "Impulsantwort" in n)
+        assert "L" in ir_note and "R" in ir_note
         assert all(c.decay_confirmed is None for c in report.mode_confirmations)
+        assert all(c.decay_confirmed is None for c in report.mode_confirmations_r)
         # Ohne Abkling-Bestaetigung duerfen keine Mode-Cuts entstehen.
         mode_cuts = [p for p in report.eq_proposals_l if "Mode" in p.reason or "mode" in p.reason.lower()]
         assert mode_cuts == []
@@ -468,6 +471,9 @@ class TestRunPipelineReleaseMarking:
 
     def test_two_positions_real_run_is_never_released_with_filters(self, tmp_path):
         positions = [_synthetic_position("sofa_mitte", with_ir=True), _synthetic_position("wander_0")]
+        # Beide Kanaele benoetigen ihre eigene Referenz-IR, damit der Test
+        # die kanalgetrennte Filtererzeugung fuer L und R prueft.
+        positions[0]["r"]["impulse_response"] = _synthetic_ir_with_slow_decay()
         _write_input(tmp_path / "in.json", positions)
         report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
         assert report.eq_proposals_l and report.eq_proposals_r  # Filter werden vorgeschlagen
