@@ -43,3 +43,4 @@
 ### 4.3 `Mosconi Pico 8/10` & `Smart 453` (`SMART453_BASS_SPEC.md`)
 - **Trennung:** Die Smart-453-Fahrzeuganalyse bleibt konzeptionell im eigenständigen Top-Level-Namespace `smart453_bass/`. `spatial_analyzer/adapters/mosconi_pico/` dient zunächst nur als Gerätefähigkeits- und Validierungsmodul.
 - **Gerätegrenzen:** Delay-Raster **`0,02 ms`** (nicht `0,01 ms`), `12/24 dB LR`-Weichen, max. `6 PEQs`/Kanal, Phase `0°/180°`, Hochtöner-HPF-Schutz `>= 2.500 Hz`.
+
