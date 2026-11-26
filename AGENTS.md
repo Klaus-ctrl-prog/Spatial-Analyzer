@@ -4,6 +4,8 @@
 - **Arbeits-Branch:** `fix/package-a-measurement-qc-20261124`
 - **Arbeitspakete für Claude Code:** `Paket B` und `Paket C` sind implementiert und Bestandteil von PR #31 (Open / Draft, nicht gemergt).
 - **Review-Stand PR #31:** Befund G1 (`build_preview`) ist behoben, unabhängig geprüft (`APPROVED`), committet und gepusht (`4253dee`). Merge-Freigabe steht aus.
+- **G2 (Mosconi `delay_to_steps`/`delay_grid_value`):** implementiert, von Sonnet 5.5 unabhängig mit `APPROVED` geprüft, separat committet und gepusht (`3ed4fef`); Ubuntu- und Windows-CI erfolgreich.
+- **G3 (`-0.0` im Digest, `filter_export.py`):** weiterhin offen und nicht bearbeitet.
 - **Weiterhin offen:** Hardwarevalidierung (`hardware_validated: false`), reales Saxx-Template sowie Einbindung in Subwoofer-Generator, Pipeline/CLI und Phase-Gate.
 - **Reale Messdaten:** Frühjahr 2027
 - **Saxx-Hardware-Rundtest:** ab April 2027
