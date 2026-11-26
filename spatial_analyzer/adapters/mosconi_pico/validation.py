@@ -49,6 +49,10 @@ def delay_to_steps(delay_ms: float) -> int:
 
 
 def _exact(delay_ms: float) -> Fraction:
+    # Gleiche Zulaessigkeit wie validate_channel: nur endliche int/float (kein bool, kein str/None);
+    # verhindert OverflowError (z. B. 10**400) bzw. uneinheitliche TypeError/ValueError.
+    if not _num(delay_ms):
+        raise MosconiValidationError(f"delay_ms muss eine endliche Zahl sein (erhalten: {type(delay_ms).__name__}).")
     return Fraction(repr(float(delay_ms)))
 
 

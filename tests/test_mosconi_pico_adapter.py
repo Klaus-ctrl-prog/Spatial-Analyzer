@@ -8,7 +8,7 @@ import pytest
 
 from spatial_analyzer.adapters.mosconi_pico import MosconiValidationError, map_channels, validate_channel
 from spatial_analyzer.adapters.mosconi_pico.capabilities import DELAY_GRID_MS
-from spatial_analyzer.adapters.mosconi_pico.validation import delay_to_steps
+from spatial_analyzer.adapters.mosconi_pico.validation import delay_grid_value, delay_to_steps
 
 
 def _tw(**kw):
@@ -114,6 +114,28 @@ def test_huge_delay_does_not_overflow_and_is_exact():
 def test_non_finite_or_non_numeric_delay_is_validation_error(val):
     with pytest.raises(MosconiValidationError):
         map_channels([_tw(delay_ms=val)])
+
+
+_BAD_DELAYS = [10 ** 400, -10 ** 400, 10 ** 309, float("inf"), float("-inf"), float("nan"), True, False, "0.5", None]
+
+
+@pytest.mark.parametrize("val", _BAD_DELAYS)
+def test_delay_helpers_reject_invalid_input_with_validation_error(val):
+    # Regression G2: direkter Aufruf der Hilfsfunktionen warf OverflowError/TypeError/ValueError uneinheitlich.
+    with pytest.raises(MosconiValidationError):
+        delay_to_steps(val)
+    with pytest.raises(MosconiValidationError):
+        delay_grid_value(val)
+
+
+@pytest.mark.parametrize("want,steps", [(0.0, 0), (0, 0), (0.01, 1), (0.03, 2), (0.05, 3), (0.5, 25), (1, 50), (1e308, None)])
+def test_delay_helpers_unchanged_for_valid_input(want, steps):
+    got_steps, grid, deviation = delay_grid_value(want)
+    assert delay_to_steps(want) == got_steps
+    if steps is not None:
+        assert got_steps == steps
+    else:
+        assert isinstance(got_steps, int) and got_steps > 10 ** 300  # wie bisher: kein Geraetemaximum belegt
 
 
 @pytest.mark.parametrize("name", [[1], {"a": 1}, 5, None, 1.5, ("a",)])
