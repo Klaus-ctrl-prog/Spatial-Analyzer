@@ -141,6 +141,29 @@ def test_blocked_exports_not_mapped_but_previewable_and_marked():
         assert "NICHT FREIGEGEBEN" in text and "hardware_validated=false" in text and "Index" in text
 
 
+def test_build_preview_default_never_requires_release_and_marks_unreleased():
+    doc = _doc(no_harm=NoHarmResult(NoHarmStatus.UNSAFE, "x", 1))
+    prev = build_preview(doc)
+    assert prev.released is False
+    assert build_preview(_doc()).released is True  # SAFE/RELEASED bleibt als freigegeben markiert
+
+
+def test_build_preview_rejects_require_released_argument():
+    # Regression G1: frueher TypeError "multiple values for keyword argument" aus map_export_to_edit;
+    # jetzt bewusst ueber die explizite Preview-Signatur abgewiesen (True wie False).
+    for value in (True, False):
+        with pytest.raises(TypeError, match="unexpected keyword argument .require_released."):
+            build_preview(_doc(), require_released=value)
+
+
+def test_build_preview_regular_parameters_still_work():
+    doc = _doc()
+    res = build_preview(doc, profile_name="Vorschau", reset_unused_bands=False, tables=T)
+    assert res.edit["name"] == "Vorschau"
+    assert res.edit["eq"] == map_export_to_edit(doc, reset_unused_bands=False).edit["eq"]
+    assert build_preview(doc, tables=T).edit == build_preview(doc).edit
+
+
 def test_wrong_target_or_invalid_export_refused():
     doc = build_filter_export(run_id="r", target_device="mosconi_pico_8_10", no_harm=SAFE, measurement_set_id="m",
                               subwoofer_filters=[PeakingFilter("peq", 50.0, -3.0, 4.0)])

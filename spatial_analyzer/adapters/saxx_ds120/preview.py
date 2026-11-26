@@ -11,9 +11,25 @@ from typing import Any
 from spatial_analyzer.adapters.saxx_ds120.mapper import MappingResult, map_export_to_edit
 
 
-def build_preview(doc: dict[str, Any], **kwargs: Any) -> MappingResult:
-    """Wie map_export_to_edit, aber ohne Freigabepflicht (Vorschau)."""
-    return map_export_to_edit(doc, require_released=False, **kwargs)
+def build_preview(
+    doc: dict[str, Any],
+    *,
+    profile_name: str | None = None,
+    reset_unused_bands: bool = True,
+    tables: dict[str, tuple[float, ...]] | None = None,
+) -> MappingResult:
+    """Wie map_export_to_edit, aber ohne Freigabepflicht (Vorschau).
+
+    `require_released` wird bewusst nicht akzeptiert: die Vorschau ist nie
+    freigabepflichtig und darf nicht per Argument umkonfiguriert werden.
+    """
+    return map_export_to_edit(
+        doc,
+        profile_name=profile_name,
+        require_released=False,
+        reset_unused_bands=reset_unused_bands,
+        tables=tables,
+    )
 
 
 def render_preview(result: MappingResult) -> str:
