@@ -4,12 +4,20 @@
 Nur Uebersetzung/Quantisierung/Validierung - keine Akustik. Verwendet
 ausschliesslich `filters.subwoofer` (nie eq_proposals_l/r), schreibt nur
 Tabellenwerte ins Edit-JSON und dokumentiert jede Quantisierung.
-Freigabe: nur `approval.status == RELEASED` (Do-No-Harm SAFE); der Mapper
-erzeugt keine Datei und spricht keine Hardware an.
+Freigabe: Der Saxx DS120 ist IMMER nicht freigegeben (kein Subwoofer-Do-No-Harm-
+Modell, siehe filter_export.is_device_released); die Abbildung ist nur als
+Vorschau moeglich. Der Mapper erzeugt keine Datei und spricht keine Hardware an.
+
+Reproduzierbarkeit: Eingabe- (mapping_input_sha256), Ausgabe- (mapping_output_sha256)
+und Tabellen-Digest (tables_sha256) werden kanonisch berechnet. verify_mapping()
+rechnet neu und vergleicht; ein separat gelieferter Hash wird nie vertraut.
+Integritaet, keine Authentizitaet (kein Geheimnis/keine Signatur).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +28,7 @@ from spatial_analyzer.adapters.saxx_ds120.quantization import (
     quantize,
 )
 from spatial_analyzer.adapters.saxx_ds120.validation import (
+    BUILDER_VERSION,
     BYPASS_ACTIVE,
     BYPASS_BYPASSED,
     EQ_BANDS,
@@ -28,14 +37,21 @@ from spatial_analyzer.adapters.saxx_ds120.validation import (
     XOVER_TYPES,
     validate_edit_json,
 )
-from spatial_analyzer.filter_export import FilterExportError, validate_filter_export
+from spatial_analyzer.filter_digest import FilterDigestError, canonical_float
+from spatial_analyzer.filter_export import (
+    FilterExportError,
+    is_device_released,
+    validate_filter_export,
+)
 
 TARGET_DEVICE = "saxx_ds120"
+MAPPER_VERSION = "1"
 _SHELF_TYPE = {("lowshelf", 6): "LS6", ("lowshelf", 12): "LS12", ("highshelf", 6): "HS6", ("highshelf", 12): "HS12"}
+_TABLE_NAMES = ("frequency_hz", "gain_db", "q")
 
 
 class AdapterBlockedError(SaxxAdapterError):
-    """Export ist nicht freigegeben (Do-No-Harm != SAFE)."""
+    """Export ist nicht freigegeben (Saxx: keine Geraetefreigabe ohne Subwoofer-Do-No-Harm-Modell)."""
 
 
 class MappingError(SaxxAdapterError):
@@ -44,11 +60,113 @@ class MappingError(SaxxAdapterError):
 
 @dataclass
 class MappingResult:
+    """Ergebnis der Abbildung. `notes` sind rein informativ und NICHT vom mapping_output_sha256 erfasst."""
+
     edit: dict[str, Any]
     quantization: list[Quantized] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     released: bool = False
     hardware_validated: bool = HARDWARE_VALIDATED
+    mapping_input_sha256: str = ""
+    mapping_output_sha256: str = ""
+    tables_sha256: str = ""
+
+
+def _canon_json(obj: Any) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _canon_tree(v: Any) -> Any:
+    """Rekursiv: Floats normiert (-0.0 -> 0.0), ganze Zahlen/bool/str/None unveraendert."""
+    if isinstance(v, dict):
+        return {k: _canon_tree(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_canon_tree(x) for x in v]
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return canonical_float(v)
+    raise MappingError(f"Nicht kanonisierbarer Wert vom Typ {type(v).__name__}.")
+
+
+def tables_sha256(tables: dict[str, Any]) -> str:
+    """SHA-256 der tatsaechlich verwendeten Tabellen (frequency_hz, gain_db, q)."""
+    try:
+        payload = {name: [canonical_float(v) for v in tables[name]] for name in _TABLE_NAMES}
+        text = _canon_json(payload)
+    except (FilterDigestError, KeyError, TypeError) as exc:
+        raise MappingError(f"Tabellen nicht digestierbar ({exc!r}).") from exc
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canon_shelf(slope: Any) -> int | None:
+    """Shelf-Flanke kanonisch: None oder exakt 6/12 (int oder float, 12.0 == 12); alles andere ist ein Fehler."""
+    if slope is None:
+        return None
+    if isinstance(slope, bool) or not isinstance(slope, (int, float)) or slope not in (6, 12):
+        raise MappingError(f"shelf_slope_db {slope!r} ist keine gueltige Flanke (6 oder 12).")
+    return int(slope)
+
+
+def compute_mapping_input_sha256(
+    doc: dict[str, Any],
+    *,
+    profile_name: str | None,
+    reset_unused_bands: bool,
+    tables: dict[str, tuple[float, ...]] | None,
+) -> str:
+    """SHA-256 aller Eingaben, die das Edit-JSON bestimmen (Export, Optionen, Tabellen)."""
+    tbl = tables if tables is not None else load_lookup_tables()
+    cf = canonical_float
+    try:
+        xo = doc["crossovers"]
+
+        def _xo(x: Any) -> dict[str, Any] | None:
+            if x is None:
+                return None
+            return {"frequency_hz": cf(x["frequency_hz"]), "type": x["type"], "enabled": x["enabled"]}
+
+        payload = {
+            "domain": "spatial_analyzer.saxx_ds120.mapping_input.v1",
+            "mapper_version": MAPPER_VERSION,
+            "builder_version": BUILDER_VERSION,
+            "contract_version": doc["contract_version"],
+            "target_device": doc["target_device"],
+            "subwoofer": [
+                [f["type"], cf(f["fc_hz"]), cf(f["gain_db"]), cf(f["q"]), _canon_shelf(f.get("shelf_slope_db"))]
+                for f in doc["filters"]["subwoofer"]
+            ],
+            "crossovers": {"hpf": _xo(xo["hpf"]), "lpf": _xo(xo["lpf"]), "phase_deg": xo.get("phase_deg")},
+            "profile_name": profile_name,
+            "reset_unused_bands": bool(reset_unused_bands),
+            "tables_sha256": tables_sha256(tbl),
+        }
+        text = _canon_json(payload)
+    except (FilterDigestError, KeyError, TypeError) as exc:
+        raise MappingError(f"Mapping-Eingabe nicht digestierbar ({exc!r}).") from exc
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def compute_mapping_output_sha256(result_like: Any) -> str:
+    """SHA-256 des Ergebnisses (edit, Quantisierung, Status, Bezug zu Eingabe und Tabellen)."""
+    cf = canonical_float
+    try:
+        payload = {
+            "domain": "spatial_analyzer.saxx_ds120.mapping_output.v1",
+            "mapping_input_sha256": result_like.mapping_input_sha256,
+            "edit": _canon_tree(result_like.edit),
+            "quantization": [
+                [q.label, cf(q.target), cf(q.table_value), q.index, cf(q.deviation)]
+                for q in result_like.quantization
+            ],
+            "released": bool(result_like.released),
+            "hardware_validated": bool(result_like.hardware_validated),
+            "tables_sha256": result_like.tables_sha256,
+        }
+        text = _canon_json(payload)
+    except (FilterDigestError, AttributeError, TypeError) as exc:
+        raise MappingError(f"Mapping-Ergebnis nicht digestierbar ({exc!r}).") from exc
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _assign_bands(filters: list[dict[str, Any]]) -> list[tuple[int, str, dict[str, Any]]]:
@@ -79,20 +197,24 @@ def map_export_to_edit(
     reset_unused_bands: bool = True,
     tables: dict[str, tuple[float, ...]] | None = None,
 ) -> MappingResult:
-    """Erzeugt das Edit-JSON. `require_released=False` nur fuer die Vorschau
-    (Ergebnis bleibt als nicht freigegeben markiert)."""
+    """Erzeugt das Edit-JSON. Saxx ist nie geraetefreigegeben: mit
+    `require_released=True` (Standard) wird immer AdapterBlockedError geworfen;
+    `require_released=False` liefert die als nicht freigegeben markierte Vorschau."""
     try:
         validate_filter_export(doc)
     except FilterExportError as exc:
         raise MappingError(str(exc)) from exc
     if doc["target_device"] != TARGET_DEVICE:
         raise MappingError(f"target_device {doc['target_device']!r} ist nicht {TARGET_DEVICE!r}.")
-    released = doc["approval"]["status"] == "RELEASED"
+    released = is_device_released(doc)  # fuer Saxx immer False
     why = f"Do-No-Harm: {doc['approval']['do_no_harm']}"
     if doc["approval"]["do_no_harm"] == "SAFE":
         why += "; Freigabe nicht an die exportierten Filter gebunden (Pruefung deckt sie nicht ab)"
     if require_released and not released:
-        raise AdapterBlockedError(f"Export nicht freigegeben ({why}) - keine Abbildung.")
+        raise AdapterBlockedError(
+            f"Export nicht freigegeben ({why}) - keine Abbildung. "
+            "Saxx DS120: keine Geraetefreigabe ohne Subwoofer-Do-No-Harm-Modell."
+        )
     tables = tables or load_lookup_tables()
     quant: list[Quantized] = []
     notes: list[str] = ["hardware_validated=false: Offline-Abbildung ist keine Hardwarevalidierung."]
@@ -152,4 +274,54 @@ def map_export_to_edit(
         edit["eq"] = eq
 
     validate_edit_json(edit, tables)
-    return MappingResult(edit=edit, quantization=quant, notes=notes, released=released)
+    result = MappingResult(edit=edit, quantization=quant, notes=notes, released=released)
+    result.mapping_input_sha256 = compute_mapping_input_sha256(
+        doc, profile_name=profile_name, reset_unused_bands=reset_unused_bands, tables=tables
+    )
+    result.tables_sha256 = tables_sha256(tables)
+    result.mapping_output_sha256 = compute_mapping_output_sha256(result)
+    return result
+
+
+def verify_mapping(
+    doc: dict[str, Any],
+    result: MappingResult,
+    *,
+    profile_name: str | None = None,
+    reset_unused_bands: bool = True,
+    tables: dict[str, tuple[float, ...]] | None = None,
+) -> None:
+    """Rechnet die Abbildung neu und prueft das Ergebnis; wirft MappingError bei Abweichung.
+
+    Hinweis: `notes` sind informativ und werden nicht verifiziert (nicht vom Ausgabe-Hash erfasst).
+
+    Vertraut keinem mitgelieferten Hash: verglichen werden die Neuberechnung
+    (Eingabe-Hash, Edit, Quantisierung, Ausgabe-Hash) und der Ausgabe-Hash aus
+    dem aktuellen Inhalt von `result` (erkennt nachtraegliche Aenderungen).
+    """
+    try:
+        fresh = map_export_to_edit(
+            doc, profile_name=profile_name, require_released=False,
+            reset_unused_bands=reset_unused_bands, tables=tables,
+        )
+    except MappingError:
+        raise
+    except SaxxAdapterError as exc:
+        raise MappingError(f"Neuberechnung fehlgeschlagen: {exc}") from exc
+    problems: list[str] = []
+    if fresh.mapping_input_sha256 != result.mapping_input_sha256:
+        problems.append("mapping_input_sha256 weicht ab (Export, Profilname, Optionen oder Tabellen geaendert)")
+    if fresh.edit != result.edit:
+        problems.append("edit weicht von der Neuberechnung ab")
+    if fresh.quantization != result.quantization:
+        problems.append("quantization weicht von der Neuberechnung ab")
+    if fresh.released != result.released:
+        problems.append("released weicht von der Neuberechnung ab")
+    if fresh.mapping_output_sha256 != result.mapping_output_sha256:
+        problems.append("mapping_output_sha256 weicht von der Neuberechnung ab")
+    if compute_mapping_output_sha256(result) != result.mapping_output_sha256:
+        problems.append("mapping_output_sha256 passt nicht zu edit/quantization des Ergebnisses (manipuliert)")
+    if result.hardware_validated is not False:
+        problems.append("hardware_validated muss false sein")
+    if problems:
+        raise MappingError("Mapping-Verifikation fehlgeschlagen:\n- " + "\n- ".join(problems))
