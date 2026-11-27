@@ -17,12 +17,13 @@ Artefakte deutlich als NICHT FREIGEGEBEN.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
 
 from spatial_analyzer.biquad_preview import PeakingFilter, simulate_multi_position_preview
+from spatial_analyzer.filter_digest import peaking_filters_digest
 from spatial_analyzer.models import FieldMeaning
 
 DEFAULT_MODE_BAND_HZ = (20.0, 200.0)
@@ -35,6 +36,10 @@ DEFAULT_SPATIAL_HARM_TOLERANCE_DB = 0.5
 DEFAULT_LOCAL_HARM_TOLERANCE_DB = 2.0  # Arbeitswert: max. Zunahme der Streuung an einer Frequenz
 DEFAULT_TARGET_HARM_TOLERANCE_DB = 0.5  # Arbeitswert: max. Zunahme der RMS-Zielabweichung
 MIN_POSITIONS_FOR_NO_HARM = 3  # Arbeitswert: darunter keine belastbare raeumliche Aussage
+# Umfang der Pruefung: "left_right" = Vorschau ueber filters_l/filters_r ist gelaufen;
+# "none" = keine (vollstaendige) Pruefung, z. B. keine Filter oder INCONCLUSIVE.
+CHECKED_SCOPE_LEFT_RIGHT = "left_right"
+CHECKED_SCOPE_NONE = "none"
 
 
 @dataclass
@@ -198,8 +203,18 @@ class NoHarmStatus(str, Enum):
         return self is NoHarmStatus.SAFE
 
 
-@dataclass
+@dataclass(frozen=True)
 class NoHarmResult:
+    """Ergebnis der Do-No-Harm-Pruefung.
+
+    `checked_scope` und `checked_filters_sha256` sind KEIN Konstruktorargument
+    (init=False): sie werden nur in validate_no_harm() gesetzt und belegen, dass
+    die Vorschau tatsaechlich ueber die Filter lief. Ein selbst gebautes Ergebnis
+    traegt scope "none" und sha None. Grenze: In-Prozess-Python kann eine gezielte
+    Faelschung (z. B. object.__setattr__) nicht verhindern; die Bindung unterscheidet
+    fuer normale Aufrufer eine durchgefuehrte von einer behaupteten Pruefung.
+    """
+
     status: NoHarmStatus
     reason: str
     n_positions: int
@@ -209,6 +224,8 @@ class NoHarmResult:
     max_local_spread_increase_hz: float | None = None
     target_dev_before_db: float | None = None
     target_dev_after_db: float | None = None
+    checked_scope: str = field(default=CHECKED_SCOPE_NONE, init=False)
+    checked_filters_sha256: str | None = field(default=None, init=False)  # Digest der geprueften L/R-Filter
 
     @property
     def is_released(self) -> bool:
@@ -319,7 +336,11 @@ def validate_no_harm(
     else:
         status = NoHarmStatus.SAFE
         reason = f"raeumliche Streuung {spread_before:.2f} dB -> {spread_after:.2f} dB, innerhalb der Toleranzen"
-    return NoHarmResult(
+    result = NoHarmResult(
         status, reason, n_positions, spread_before, spread_after, max_local, max_local_hz,
         dev_before, dev_after,
     )
+    # Frozen dataclass und init=False: Bindung nur hier, direkt nach dem Erzeugen (siehe Klassen-Docstring).
+    object.__setattr__(result, "checked_scope", CHECKED_SCOPE_LEFT_RIGHT)
+    object.__setattr__(result, "checked_filters_sha256", peaking_filters_digest(filters_l, filters_r))
+    return result

@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -94,10 +96,15 @@ class TestSpreadMetrics:
         np.testing.assert_allclose(metrics.range_db, [4.0, 8.0])
         np.testing.assert_array_equal(metrics.n_valid, [3, 3])
 
-    def test_nan_reduces_n_valid(self):
+    def test_nan_reduces_n_valid_without_runtime_warning(self):
         values = np.array([[60.0, np.nan], [62.0, 74.0]])
-        metrics = spread_metrics(values)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            metrics = spread_metrics(values)
+
         np.testing.assert_array_equal(metrics.n_valid, [2, 1])
+        np.testing.assert_allclose(metrics.std_db[0], np.sqrt(2.0))
+        assert np.isnan(metrics.std_db[1])
 
 
 class TestCaseBootstrapBand:

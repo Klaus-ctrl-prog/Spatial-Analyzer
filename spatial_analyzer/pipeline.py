@@ -438,26 +438,34 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
             f"Keine Position mit id='sofa_mitte' gefunden - '{reference_position.get('id')}' "
             "als Referenz fuer die Abklinganalyse verwendet."
         )
-    reference_ir = reference_position.get("l", {}).get("impulse_response")
-    if reference_ir is None:
+    reference_ir_l = reference_position.get("l", {}).get("impulse_response")
+    reference_ir_r = reference_position.get("r", {}).get("impulse_response")
+    missing_ir_channels = [
+        channel.upper()
+        for channel, reference_ir in (("l", reference_ir_l), ("r", reference_ir_r))
+        if reference_ir is None
+    ]
+    if missing_ir_channels:
         notes.append(
-            "Keine Impulsantwort an der Referenzposition vorhanden - Abklinganalyse "
-            "wird uebersprungen, Modenkandidaten bleiben decay_confirmed=None und werden "
-            "deshalb NICHT fuer Cut-Vorschlaege verwendet (siehe eq_solver.py)."
+            "Keine Referenz-Impulsantwort vorhanden fuer Kanal/Kanaele "
+            f"{', '.join(missing_ir_channels)}; Abklinganalyse fuer diese Kanaele uebersprungen."
         )
-
-    confirmations = _confirm_mode_candidates(
-        l_data.freq_hz, averaged_l, l_data.spl_db, room, reference_ir
+    confirmations_l = _confirm_mode_candidates(
+        l_data.freq_hz, averaged_l, l_data.spl_db, room, reference_ir_l
     )
-    comb_filter_freqs = [c.freq_hz for c in confirmations if c.classification == "comb_filter_candidate"]
+    confirmations_r = _confirm_mode_candidates(
+        r_data.freq_hz, averaged_r, r_data.spl_db, room, reference_ir_r
+    )
+    comb_filter_freqs_l = [c.freq_hz for c in confirmations_l if c.classification == "comb_filter_candidate"]
+    comb_filter_freqs_r = [c.freq_hz for c in confirmations_r if c.classification == "comb_filter_candidate"]
 
-    eq_proposals_l = propose_mode_cuts(l_data.freq_hz, averaged_l, target_l, confirmations)
+    eq_proposals_l = propose_mode_cuts(l_data.freq_hz, averaged_l, target_l, confirmations_l)
     eq_proposals_l += propose_broadband_correction(
-        l_data.freq_hz, averaged_l, target_l, excluded_freqs_hz=comb_filter_freqs
+        l_data.freq_hz, averaged_l, target_l, excluded_freqs_hz=comb_filter_freqs_l
     )
-    eq_proposals_r = propose_mode_cuts(r_data.freq_hz, averaged_r, target_r, confirmations)
+    eq_proposals_r = propose_mode_cuts(r_data.freq_hz, averaged_r, target_r, confirmations_r)
     eq_proposals_r += propose_broadband_correction(
-        r_data.freq_hz, averaged_r, target_r, excluded_freqs_hz=comb_filter_freqs
+        r_data.freq_hz, averaged_r, target_r, excluded_freqs_hz=comb_filter_freqs_r
     )
 
     filters_l = [p.filter for p in eq_proposals_l]
@@ -574,7 +582,9 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
             "l_spread_db_mean": float(np.nanmean(spread_l.std_db)),
             "r_spread_db_mean": float(np.nanmean(spread_r.std_db)),
         },
-        mode_confirmations=confirmations,
+        mode_confirmations=confirmations_l,
+        mode_confirmations_l=confirmations_l,
+        mode_confirmations_r=confirmations_r,
         sub_optimizer_result=sub_result,
         eq_proposals_l=eq_proposals_l,
         eq_proposals_r=eq_proposals_r,

@@ -78,13 +78,17 @@ erhalten, ein neues `--notes` ersetzt sie.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 import numpy as np
 
@@ -518,6 +522,7 @@ def build_notes_text(
     signal_path: str | None,
     block: int | None = None,
     setup_notes: str | None = None,
+    operating_state: OperatingState | None = None,
 ) -> str:
     """Text-Entwurf im Stil von `docs/REW_NOTES_TEMPLATE.md` zum manuellen
     Einfuegen ins REW-Notes-Feld. Dieses Modul schreibt NICHT automatisch in
@@ -543,6 +548,8 @@ def build_notes_text(
         lines.append(f"Mosconi-Preset: {smart453_preset}")
     if setup_notes:
         lines.append(f"Setup-Notiz: {setup_notes}")
+    if operating_state is not None:
+        lines.extend(operating_state.notes_lines())
     return "\n".join(lines)
 
 
@@ -552,6 +559,235 @@ def write_notes_sidecar(notes_dir: str | Path, measurement_name: str, text: str)
     path = directory / f"{measurement_name}.txt"
     path.write_text(text, encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Paket B (Rev. 26): Manifest-Version, Betriebszustand, Timing-QC, REW-Metadaten
+# ---------------------------------------------------------------------------
+
+# Manifeste ohne `manifest_version` stammen aus dem Vor-Paket-B-Stand (Legacy).
+# Sie werden nur gelesen; Fortsetzungen entstehen als separates Manifest.
+MANIFEST_VERSION = 2
+LEGACY_MANIFEST_VERSION = 1
+SUPPORTED_MANIFEST_VERSIONS: tuple[int, ...] = (LEGACY_MANIFEST_VERSION, MANIFEST_VERSION)
+
+
+class ManifestReadError(ValueError):
+    """Manifest-Lesefehler (Format/Version). Getrennt von fachlichen QC-Statuswerten."""
+EXPECTED_REW_SAMPLE_RATE = 48000.0
+SAXX_LPF_CHOICES: tuple[str, ...] = ("aus", "aktiv")
+DYNAMIC_EQ_CHOICES: tuple[str, ...] = ("aus", "high active")
+
+
+class TimingQcStatus(str, Enum):
+    """Eigenstaendiger fachlicher QC-Status der Acoustic Timing Reference.
+
+    Bewusst NICHT `NoHarmStatus`: die Do-No-Harm-Freigabe in eq_solver.py
+    bleibt unberuehrt. OK ist nur mit einem dokumentierten REW-Nachweis
+    moeglich; Standard ist INCONCLUSIVE, eine automatische Hochstufung gibt es nicht.
+    """
+
+    OK = "OK"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+# Dokumentierte REW-Felder, die eine Acoustic Timing Reference belegen.
+# Stand der Bestandspruefung: KEINE. Die REW-API liefert (Liste und Detail)
+# title, notes, date, uuid, containingFileName, containingFilePath,
+# containingFileNotes, startFreq, endFreq, inverted, sampleRate, rewVersion,
+# splOffsetdB, alignSPLOffsetdB, micCalPath, soundcardCalPath. Freitext
+# (notes) gilt nicht als belastbare Quelle.
+DOCUMENTED_TIMING_FIELDS: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TimingQcResult:
+    status: TimingQcStatus
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"status": self.status.value, "reason": self.reason}
+
+
+def determine_timing_qc(*, legacy: bool) -> TimingQcResult:
+    """Bestimmt den Timing-QC-Status. Ohne dokumentiertes REW-Feld ist das
+    Ergebnis immer INCONCLUSIVE (keine Hochstufung ohne belastbaren Nachweis).
+    Fehlende Timing-Information wird NICHT als Parser- oder Lesefehler behandelt."""
+    if legacy:
+        return TimingQcResult(
+            TimingQcStatus.INCONCLUSIVE,
+            "Legacy-Manifest: keine dokumentierte Acoustic Timing Reference",
+        )
+    if not DOCUMENTED_TIMING_FIELDS:
+        return TimingQcResult(
+            TimingQcStatus.INCONCLUSIVE,
+            "keine dokumentierte REW-Timing-Information verfuegbar",
+        )
+    return TimingQcResult(
+        TimingQcStatus.INCONCLUSIVE,
+        "dokumentierte Timing-Felder vorhanden, Auswertung nicht implementiert",
+    )
+
+
+class PhaseEvaluationBlocked(RuntimeError):
+    """Phasenabhaengige Auswertung ohne Timing-QC-Status OK."""
+
+
+def require_phase_evaluation(timing: TimingQcResult) -> None:
+    """Sperrt phasenabhaengige Auswertungen, solange der Timing-Status nicht OK ist.
+    Nicht phasenabhaengige Diagnostik ist davon nicht betroffen.
+
+    Status Paket B: das Gate ist in guided_session.py bereitgestellt, aber NOCH NICHT
+    global integriert. Die Integration in die tatsaechlichen phasenabhaengigen
+    Auswerter ist ein offener Punkt fuer Paket C."""
+    if timing.status is not TimingQcStatus.OK:
+        raise PhaseEvaluationBlocked(
+            f"phasenabhaengige Auswertung gesperrt (Timing-QC {timing.status.value}: {timing.reason})"
+        )
+
+
+@dataclass(frozen=True)
+class MetadataFinding:
+    field: str
+    problem: str  # "fehlend" | "ungueltig" | "widerspruechlich"
+    message: str
+
+
+def check_rew_metadata(raw: dict[str, Any] | None) -> list[MetadataFinding]:
+    """Prueft `sampleRate` (48 kHz) und `micCalPath` (UMIK-1 90°) getrennt.
+    Meldet nur: fehlende oder widerspruechliche Angaben werden NIE ergaenzt.
+    Der Timing-Status wird durch diese Pruefung nicht veraendert.
+    Eingabe: Mapping (Dict) oder None. Jeder andere Typ wird mit TypeError abgewiesen."""
+    if raw is None:
+        raw = {}
+    elif not isinstance(raw, Mapping):
+        raise TypeError(f"REW-Metadaten muessen ein Mapping/Dict sein, nicht {type(raw).__name__}")
+    findings: list[MetadataFinding] = []
+
+    sample_rate = raw.get("sampleRate")
+    if sample_rate is None:
+        findings.append(MetadataFinding("sampleRate", "fehlend", "sampleRate fehlt in den REW-Metadaten"))
+    elif isinstance(sample_rate, bool) or not isinstance(sample_rate, (int, float)):
+        findings.append(MetadataFinding("sampleRate", "ungueltig", "sampleRate ist keine Zahl"))
+    elif float(sample_rate) != EXPECTED_REW_SAMPLE_RATE:
+        findings.append(
+            MetadataFinding(
+                "sampleRate", "widerspruechlich", f"sampleRate {float(sample_rate):g} Hz statt 48000 Hz"
+            )
+        )
+
+    cal = raw.get("micCalPath")
+    if cal is None or (isinstance(cal, str) and not cal.strip()):
+        findings.append(
+            MetadataFinding("micCalPath", "fehlend", "micCalPath fehlt - keine Mikrofonkalibrierung dokumentiert")
+        )
+    elif not isinstance(cal, str):
+        findings.append(MetadataFinding("micCalPath", "ungueltig", "micCalPath ist kein Text"))
+    else:
+        # Nur der Dateiname wird geprueft und ausgegeben (kein Pfad im Manifest/Log).
+        # Erkannt wird ausschliesslich UMIK-1 (nicht UMIK-2, nicht UMIK-10).
+        file_name = re.split(r"[\\/]", cal)[-1].lower()
+        if not re.search(r"umik[-_ ]?1(?!\d)", file_name):
+            findings.append(
+                MetadataFinding("micCalPath", "widerspruechlich", "Kalibrierdatei nicht als UMIK-1 erkennbar")
+            )
+        elif "90" not in file_name:
+            findings.append(
+                MetadataFinding("micCalPath", "widerspruechlich", "UMIK-1 Kalibrierdatei nicht als 90-Grad-Datei erkennbar")
+            )
+    return findings
+
+
+class OperatingStateError(ValueError):
+    """Pflichtangabe zum Betriebszustand fehlt oder ist ungueltig - keine Messung startet."""
+
+
+@dataclass(frozen=True)
+class OperatingState:
+    door_state: str
+    saxx_lpf: str
+    dynamic_eq: str
+
+    def __post_init__(self) -> None:
+        # Auch direkte Konstruktion (ohne CLI/Manifest) wird streng geprueft:
+        # None, leere Strings und Nicht-Text sowie unbekannte Auswahlwerte werden abgewiesen.
+        problems = validate_operating_state(self.door_state, self.saxx_lpf, self.dynamic_eq)
+        if problems:
+            raise OperatingStateError("ungueltiger Betriebszustand: " + "; ".join(problems))
+
+    def to_dict(self) -> dict[str, str]:
+        return {"door_state": self.door_state, "saxx_lpf": self.saxx_lpf, "dynamic_eq": self.dynamic_eq}
+
+    def notes_lines(self) -> list[str]:
+        lines = [
+            f"Tuer-Zustand: {self.door_state}",
+            f"Saxx-LPF: {self.saxx_lpf}",
+            f"Dynamic EQ: {self.dynamic_eq}",
+        ]
+        if self.dynamic_eq == "high active":
+            lines.append("WARNUNG: Dynamic EQ aktiv (high active) - Betriebszustand bei Vergleichen beruecksichtigen")
+        return lines
+
+
+def validate_operating_state(door_state: str | None, saxx_lpf: str | None, dynamic_eq: str | None) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(door_state, str) or not door_state.strip():
+        problems.append("--door-state fehlt")
+    if not isinstance(saxx_lpf, str) or saxx_lpf not in SAXX_LPF_CHOICES:
+        problems.append(f"--saxx-lpf muss einer von {', '.join(SAXX_LPF_CHOICES)} sein")
+    if not isinstance(dynamic_eq, str) or dynamic_eq not in DYNAMIC_EQ_CHOICES:
+        problems.append(f"--dynamic-eq muss einer von {', '.join(DYNAMIC_EQ_CHOICES)} sein")
+    return problems
+
+
+def prompt_operating_state(
+    input_fn: Callable[[str], str] = input,
+    print_fn: Callable[[str], None] = print,
+    *,
+    door_state: str | None = None,
+    saxx_lpf: str | None = None,
+    dynamic_eq: str | None = None,
+    attempts: int = 3,
+) -> OperatingState:
+    """Liefert die Pflicht-Betriebszustaende. Gueltig uebergebene Werte werden
+    uebernommen, fehlende oder ungueltige interaktiv abgefragt (kein Default).
+    Nach `attempts` fehlgeschlagenen Eingaben: OperatingStateError."""
+
+    def _ask(label: str, choices: tuple[str, ...] | None, current: str | None) -> str:
+        if choices is None and isinstance(current, str) and current.strip():
+            return current
+        if choices is not None and current in choices:
+            return current  # type: ignore[return-value]
+        hint = f" ({'/'.join(choices)})" if choices else ""
+        for _ in range(attempts):
+            try:
+                answer = input_fn(f"{label}{hint}: ").strip()
+            except EOFError as exc:
+                # Geschlossene stdin: keine Antwort moeglich -> kontrollierter Abbruch statt Traceback.
+                raise OperatingStateError(
+                    f"stdin geschlossen - Pflichtangabe {label} nicht erhalten, keine Messung gestartet"
+                ) from exc
+            if choices is None and answer:
+                return answer
+            if choices is not None and answer in choices:
+                return answer
+            print_fn(f"Ungueltige oder leere Angabe fuer {label}.")
+        raise OperatingStateError(f"Pflichtangabe {label} nicht erhalten - keine Messung gestartet")
+
+    return OperatingState(
+        door_state=_ask("Tuer-/Raumzustand, z. B. 5cm_keil", None, door_state),
+        saxx_lpf=_ask("Saxx-LPF", SAXX_LPF_CHOICES, saxx_lpf),
+        dynamic_eq=_ask("Dynamic EQ", DYNAMIC_EQ_CHOICES, dynamic_eq),
+    )
+
+
+def _operating_from_dict(data: dict[str, Any] | None) -> OperatingState | None:
+    if not data:
+        return None
+    try:
+        return OperatingState(door_state=data["door_state"], saxx_lpf=data["saxx_lpf"], dynamic_eq=data["dynamic_eq"])
+    except (KeyError, TypeError):
+        return None
 
 
 @dataclass
@@ -572,6 +808,9 @@ class SessionManifestEntry:
     # Abschnitt "Zwischenspeicher & Fortsetzung"). Default haelt bestehende
     # Aufrufstellen ohne `status=` rueckwaertskompatibel.
     status: str = "completed"
+    # Befunde der REW-Metadaten-Pruefung (sampleRate, micCalPath). Nur Meldung,
+    # beeinflusst weder Status noch Timing-QC.
+    metadata_findings: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -592,12 +831,28 @@ class SessionManifest:
     # (KEF-/Saxx-Einstellungen), beides optional und fuer --resume erhalten.
     block: int | None = None
     setup_notes: str | None = None
+    # Paket B (Rev. 26). Ein im Code neu erzeugtes Manifest ist Version 2; ein
+    # Manifest ohne Versionsfeld wird beim Laden als Legacy (1) markiert, ohne
+    # fehlende Angaben zu ergaenzen.
+    manifest_version: int = MANIFEST_VERSION
+    run_id: str | None = None
+    operating_state: dict[str, str] | None = None
+    timing_qc: dict[str, str] | None = None
+    predecessor: dict[str, Any] | None = None
+    # Nachtraegliche Angaben zu historischen Messungen, getrennt von `entries`.
+    nachtraege: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.manifest_version < MANIFEST_VERSION
 
     def add(self, entry: SessionManifestEntry) -> None:
         self.entries.append(entry)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "manifest_version": self.manifest_version,
+            "run_id": self.run_id,
             "profile": self.profile,
             "dry_run": self.dry_run,
             "created_at": self.created_at,
@@ -606,6 +861,10 @@ class SessionManifest:
             "signal_path": self.signal_path,
             "block": self.block,
             "setup_notes": self.setup_notes,
+            "operating_state": self.operating_state,
+            "timing_qc": self.timing_qc,
+            "predecessor": self.predecessor,
+            "nachtraege": self.nachtraege,
             "entries": [e.to_dict() for e in self.entries],
         }
 
@@ -621,6 +880,202 @@ class SessionManifest:
         tmp_path.replace(target)
 
 
+def _validate_manifest_schema(data: dict[str, Any], raw_entries: list[dict[str, Any]]) -> None:
+    """Zentrale Schema-Pruefung aller Manifestfelder (Paket B).
+
+    Regeln: Legacy (Version 1) darf optionale Felder weglassen, vorhandene Werte
+    muessen aber korrekt typisiert sein. Version 2 verlangt alle Felder. Es gibt
+    keine stillen Defaults und keine Korrekturen; jeder Verstoss ist ein
+    ManifestReadError (Lesefehler, nie ein QC-Status)."""
+    version = data.get("manifest_version", LEGACY_MANIFEST_VERSION)
+    strict = version == MANIFEST_VERSION
+
+    def bad(name: str, why: str) -> None:
+        raise ManifestReadError(f"Manifest-Feld {name!r} ungueltig: {why}")
+
+    def required(name: str, container: dict[str, Any]) -> bool:
+        """Vorhanden? In Version 2 ist jedes Feld Pflicht, in Legacy optional."""
+        if name in container:
+            return True
+        if strict:
+            bad(name, "Pflichtfeld fehlt (Version 2)")
+        return False
+
+    def text(name: str, value: Any, *, nullable: bool = False, allowed: tuple[str, ...] | None = None,
+             nonempty: bool = False) -> None:
+        if value is None:
+            if nullable:
+                return
+            bad(name, "darf nicht leer sein")
+        if not isinstance(value, str):
+            bad(name, "muss Text sein")
+        if nonempty and not value.strip():
+            bad(name, "darf nicht leer sein")
+        if allowed is not None and value not in allowed:
+            bad(name, "unzulaessiger Wert")
+
+    def boolean(name: str, value: Any) -> None:
+        if not isinstance(value, bool):
+            bad(name, "muss Wahrheitswert sein")
+
+    def dict_or_none(name: str, value: Any) -> None:
+        if value is not None and not isinstance(value, dict):
+            bad(name, "muss Objekt oder leer sein")
+
+    def list_of_dicts(name: str, value: Any) -> None:
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            bad(name, "muss Liste von Objekten sein")
+
+    # --- Pflicht in allen Versionen -------------------------------------------
+    if "profile" not in data:
+        bad("profile", "Pflichtfeld fehlt")
+    text("profile", data["profile"], allowed=tuple(PROFILES))
+
+    # --- Grundfelder ------------------------------------------------------------
+    if required("created_at", data):
+        text("created_at", data["created_at"], nonempty=True)
+    if required("dry_run", data):
+        boolean("dry_run", data["dry_run"])
+    if required("use_aba", data):
+        boolean("use_aba", data["use_aba"])
+    if required("port_state", data):
+        text("port_state", data["port_state"], nullable=True, allowed=("stopfen_ein", "teilstopfen", "offen"))
+    if required("signal_path", data):
+        text("signal_path", data["signal_path"], nullable=True, allowed=("USB", "Bluetooth"))
+    if required("setup_notes", data):
+        text("setup_notes", data["setup_notes"], nullable=True)
+    if required("block", data):
+        block_value = data["block"]
+        if block_value is not None and (
+            isinstance(block_value, bool) or not isinstance(block_value, int) or block_value not in BLOCKS
+        ):
+            bad("block", "nur gueltige Blocknummer 1-4 oder leer")
+
+    # --- Kombinationen Profil / Block / use_aba / port_state ------------------
+    # Legacy: fehlende Block-Begleitfelder (None) sind kein Widerspruch; verglichen
+    # wird nur, wenn ein Wert gesetzt ist. Version 2 verlangt alle Felder (siehe oben).
+    use_aba = data.get("use_aba")
+    port_state = data.get("port_state")
+    block = data.get("block")
+    if use_aba is True and data["profile"] != "wohnzimmer":
+        bad("use_aba", "nur fuer Profil wohnzimmer zulaessig")
+    if block is not None:
+        if data["profile"] != "wohnzimmer":
+            bad("block", "nur fuer Profil wohnzimmer zulaessig")
+        spec = BLOCKS[block]
+        if (strict or use_aba is not None) and use_aba != spec.use_aba:
+            bad("block", "widerspricht use_aba")
+        if (strict or port_state is not None) and port_state != spec.port_state:
+            bad("block", "widerspricht port_state")
+
+    # --- Version-2-Felder -----------------------------------------------------
+    if strict:
+        required("entries", data)  # Version 2: `entries` ist striktes Pflichtfeld.
+        required("run_id", data)
+        required("operating_state", data)
+        required("timing_qc", data)
+        required("predecessor", data)
+        required("nachtraege", data)
+        if not isinstance(data["run_id"], str) or not data["run_id"].strip():
+            bad("run_id", "Pflichtfeld (Version 2) muss ein Text sein")
+        # Version 2: `timing_qc` darf nicht `null` sein (kein stilles Neubestimmen).
+        if data["timing_qc"] is None:
+            bad("timing_qc", "Pflichtfeld (Version 2) darf nicht leer sein")
+    else:
+        # Legacy: V2-only-Felder duerfen nicht vorhanden sein - auch nicht als null oder leer.
+        # Das gilt insbesondere fuer `operating_state`: Legacy-Manifeste lehnen den Schluessel
+        # ab, auch wenn sein Wert null ist (Befund I).
+        for key in ("run_id", "operating_state", "timing_qc", "predecessor", "nachtraege"):
+            if key in data:
+                bad(key, "nur in Version 2 zulaessig")
+
+    # Bewusste Unterscheidung (V2): `operating_state: null` ist fuer noch unvollstaendige
+    # bzw. unterbrochene Sessions erlaubt. Der Betriebszustand wird beim --resume
+    # verbindlich neu abgefragt (main() -> prompt_operating_state), statt ihn stillschweigend
+    # zu uebernehmen. Anders als `timing_qc` (unten), das in V2 niemals null sein darf.
+    operating = data.get("operating_state")
+    if operating is not None:
+        if not isinstance(operating, dict):
+            bad("operating_state", "muss Objekt oder leer sein")
+        if set(operating) != {"door_state", "saxx_lpf", "dynamic_eq"}:
+            bad("operating_state", "Schluessel unvollstaendig oder unzulaessig")
+        text("operating_state.door_state", operating["door_state"], nonempty=True)
+        text("operating_state.saxx_lpf", operating["saxx_lpf"], allowed=SAXX_LPF_CHOICES)
+        text("operating_state.dynamic_eq", operating["dynamic_eq"], allowed=DYNAMIC_EQ_CHOICES)
+
+    timing = data.get("timing_qc")
+    if timing is not None:
+        if not isinstance(timing, dict):
+            bad("timing_qc", "muss Objekt oder leer sein")
+        if set(timing) != {"status", "reason"}:
+            bad("timing_qc", "Schluessel unvollstaendig oder unzulaessig")
+        text("timing_qc.status", timing["status"], allowed=tuple(s.value for s in TimingQcStatus))
+        text("timing_qc.reason", timing["reason"], nonempty=True)
+
+    pred = data.get("predecessor")
+    if pred is not None:
+        if not isinstance(pred, dict):
+            bad("predecessor", "muss Objekt oder leer sein")
+        allowed_keys = {"path", "sha256", "manifest_version", "entries_inherited"}
+        if not {"path", "sha256"} <= set(pred) or not set(pred) <= allowed_keys:
+            bad("predecessor", "Schluessel unvollstaendig oder unzulaessig")
+        text("predecessor.path", pred["path"], nonempty=True)
+        text("predecessor.sha256", pred["sha256"], nonempty=True)
+        if not re.fullmatch(r"[0-9a-f]{64}", pred["sha256"]):
+            bad("predecessor.sha256", "kein SHA-256-Wert")
+        # Ganzzahl-Typ erzwingen: JSON 1.0 (Float) wuerde sonst gegen 1 verglichen und
+        # stillschweigend als Legacy-Version akzeptiert. In Version 2 ist das Feld Pflicht.
+        if "manifest_version" in pred:
+            pred_version = pred["manifest_version"]
+            if isinstance(pred_version, bool) or not isinstance(pred_version, int) or pred_version not in SUPPORTED_MANIFEST_VERSIONS:
+                bad("predecessor.manifest_version", "nicht unterstuetzte Version (nur Ganzzahl)")
+        elif strict:
+            bad("predecessor.manifest_version", "Pflichtfeld fehlt (Version 2)")
+        if "entries_inherited" in pred and (
+            isinstance(pred["entries_inherited"], bool)
+            or not isinstance(pred["entries_inherited"], int)
+            or pred["entries_inherited"] < 0
+        ):
+            bad("predecessor.entries_inherited", "muss nichtnegative Ganzzahl sein")
+
+    nachtraege = data.get("nachtraege", [])
+    list_of_dicts("nachtraege", nachtraege)
+    for item in nachtraege:
+        if set(item) != {"source", "target", "text", "timestamp"}:
+            bad("nachtraege", "Schluessel unvollstaendig oder unzulaessig")
+        text("nachtraege.source", item["source"], allowed=("nachtrag",))
+        text("nachtraege.target", item["target"], nonempty=True)
+        text("nachtraege.text", item["text"], nonempty=True)
+        text("nachtraege.timestamp", item["timestamp"], nonempty=True)
+
+    # --- Eintraege ------------------------------------------------------------
+    for index, entry in enumerate(raw_entries):
+        where = f"entries[{index}]."
+        text(where + "measurement_name", entry.get("measurement_name"), nonempty=True)
+        text(where + "position_id", entry.get("position_id"), nonempty=True)
+        for key in ("channel", "aba_state", "uuid", "detection_status", "smart453_preset"):
+            if required(key, entry):
+                text(where + key, entry[key], nullable=True)
+        for key in ("notes_text", "timestamp"):
+            if required(key, entry):
+                text(where + key, entry[key])
+        if required("status", entry):
+            text(where + "status", entry["status"], allowed=("completed", "skipped"))
+        for key in ("qc_findings", "metadata_findings"):
+            if required(key, entry):
+                list_of_dicts(where + key, entry[key])
+        # Jedes Element von metadata_findings strukturell pruefen (analog nachtraege).
+        for item_index, item in enumerate(entry.get("metadata_findings", [])):
+            item_where = f"{where}metadata_findings[{item_index}]."
+            if set(item) != {"field", "problem", "message"}:
+                bad(item_where.rstrip("."), "Schluessel unvollstaendig oder unzulaessig")
+            text(item_where + "field", item["field"], nonempty=True)
+            text(item_where + "problem", item["problem"], allowed=("fehlend", "ungueltig", "widerspruechlich"))
+            text(item_where + "message", item["message"], nonempty=True)
+        if required("kef_snapshot", entry):
+            dict_or_none(where + "kef_snapshot", entry["kef_snapshot"])
+
+
 def load_manifest(path: str | Path) -> SessionManifest:
     """Liest ein zuvor geschriebenes `session_manifest.json` fuer `--resume`
     wieder ein. Fehlende Felder (z. B. `status` in einem vor dieser Funktion
@@ -628,6 +1083,19 @@ def load_manifest(path: str | Path) -> SessionManifest:
     ein Eintrag ohne `status`-Feld stammt aus einer Version, die nur
     bestaetigte Schritte protokolliert hat, gilt also als "completed"."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ManifestReadError("Manifest-Wurzel ist kein Objekt")
+    version = data.get("manifest_version", LEGACY_MANIFEST_VERSION)
+    if isinstance(version, bool) or not isinstance(version, int) or version not in SUPPORTED_MANIFEST_VERSIONS:
+        raise ManifestReadError(
+            f"manifest_version {version!r} nicht unterstuetzt (erlaubt: {', '.join(map(str, SUPPORTED_MANIFEST_VERSIONS))})"
+        )
+    if not isinstance(data.get("profile"), str):
+        raise ManifestReadError("profile fehlt oder ist kein Text")
+    raw_entries = data.get("entries", [])
+    if not isinstance(raw_entries, list) or any(not isinstance(e, dict) for e in raw_entries):
+        raise ManifestReadError("entries ist keine Liste von Eintraegen")
+    _validate_manifest_schema(data, raw_entries)
     entries = [
         SessionManifestEntry(
             measurement_name=e["measurement_name"],
@@ -642,6 +1110,7 @@ def load_manifest(path: str | Path) -> SessionManifest:
             notes_text=e.get("notes_text", ""),
             timestamp=e.get("timestamp", ""),
             status=e.get("status", "completed"),
+            metadata_findings=e.get("metadata_findings", []),
         )
         for e in data.get("entries", [])
     ]
@@ -655,7 +1124,41 @@ def load_manifest(path: str | Path) -> SessionManifest:
         signal_path=data.get("signal_path"),
         block=data.get("block"),
         setup_notes=data.get("setup_notes"),
+        # Fehlt das Versionsfeld, ist das Manifest Legacy. Die uebrigen Paket-B-Felder
+        # bleiben dann bewusst None bzw. leer - keine stillen Defaults.
+        manifest_version=version,
+        run_id=data.get("run_id"),
+        operating_state=data.get("operating_state"),
+        timing_qc=data.get("timing_qc"),
+        predecessor=data.get("predecessor"),
+        nachtraege=data.get("nachtraege", []),
     )
+
+
+def add_nachtrag(
+    manifest: SessionManifest, target_measurement_name: str, text: str, *, timestamp: str | None = None
+) -> dict[str, str]:
+    """Fuegt eine nachtraegliche Angabe zu einer bestehenden Messung hinzu.
+
+    Die Angabe wird separat in `manifest.nachtraege` gefuehrt (source "nachtrag",
+    mit Zeitstempel). Historische Eintraege werden nicht veraendert und gelten
+    durch den Nachtrag nicht als vollstaendig dokumentiert.
+
+    Hinweis (Paket B): Es gibt KEINE CLI-Funktion fuer Nachtraege. Die Funktion ist
+    nur ueber die Python-API aufrufbar; `nachtraege` wird beim Laden validiert, aber
+    nicht ueber `main()` erfasst. Eine CLI ist ein eigener Schritt (ausserhalb Paket B)."""
+    if not text.strip():
+        raise ValueError("Nachtrag ist leer")
+    if not any(e.measurement_name == target_measurement_name for e in manifest.entries):
+        raise ValueError(f"Nachtrag verweist auf unbekannte Messung {target_measurement_name!r}")
+    item = {
+        "source": "nachtrag",
+        "target": target_measurement_name,
+        "text": text.strip(),
+        "timestamp": timestamp or _now_iso(),
+    }
+    manifest.nachtraege.append(item)
+    return item
 
 
 def _now_iso() -> str:
@@ -707,7 +1210,7 @@ def _detect_and_qc(
 
     measurement = id_result.new_measurements[0]
     qc_findings: list[QcFinding] = []
-    qc_data: dict[str, Any] = {}
+    qc_data: dict[str, Any] = {"rew_meta_raw": measurement.raw}
 
     try:
         freq_response = client.get_frequency_response(measurement.uuid)
@@ -749,10 +1252,20 @@ def run_guided_session(
     block: int | None = None,
     setup_notes: str | None = None,
     ask_setup_notes: bool = False,
+    operating_state: OperatingState | None = None,
+    predecessor: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> SessionManifest:
     """Führt eine komplette geführte Session über alle Positionen des
     Profils aus (oder bis `[q]` gedrückt wird) und schreibt dabei laufend
     das Manifest, damit bei einem Abbruch nichts verloren geht.
+
+    Paket B: `operating_state` (Tuer-/Saxx-/Dynamic-EQ-Zustand) wird in alle
+    neuen Messnotizen uebernommen; die Pflichtabfrage erfolgt in der CLI
+    (`main`), nicht hier. Ein Legacy-Manifest (ohne Versionsfeld) wird nie
+    beschrieben: die Fortsetzung entsteht als neues Manifest mit neuer
+    `run_id` und `predecessor` (Pfad + SHA-256 des Vorgaengers). Ein
+    vorhandener Zielpfad wird nie ueberschrieben (`FileExistsError`).
 
     `resume_manifest` (optional, siehe `load_manifest`/`--resume`): ein
     zuvor geschriebenes Manifest, dessen bereits mit `status == "completed"`
@@ -778,6 +1291,30 @@ def run_guided_session(
             )
     plan = build_plan(profile, use_aba)
 
+    if resume_manifest is not None and resume_manifest.is_legacy:
+        # Legacy: das Vorgaenger-Manifest bleibt unangetastet; die Fortsetzung
+        # laeuft in einem separaten Manifest mit neuer run_id weiter.
+        if predecessor is None:
+            raise ValueError("Fortsetzung eines Legacy-Manifests braucht predecessor-Angaben (Pfad, SHA-256)")
+        if Path(manifest_path).exists() or Path(manifest_path).resolve() == Path(predecessor["path"]).resolve():
+            raise FileExistsError(f"Zielpfad existiert bereits oder ist das Legacy-Manifest: {manifest_path}")
+        successor = SessionManifest(
+            profile=resume_manifest.profile,
+            dry_run=dry_run,
+            created_at=_now_iso(),
+            use_aba=use_aba,
+            port_state=port_state,
+            signal_path=signal_path,
+            block=block,
+            setup_notes=resume_manifest.setup_notes,
+            run_id=run_id or uuid4().hex,
+            timing_qc=determine_timing_qc(legacy=True).to_dict(),
+            predecessor=predecessor,
+        )
+        # Historische Eintraege werden unveraendert uebernommen (dieselben Objekte, nicht veraendert).
+        successor.entries = list(resume_manifest.entries)
+        resume_manifest = successor
+
     if resume_manifest is not None:
         manifest = resume_manifest
         manifest.dry_run = dry_run
@@ -799,6 +1336,8 @@ def run_guided_session(
         else:
             print_fn("Alle Schritte dieser Kampagne sind bereits abgeschlossen.")
     else:
+        if Path(manifest_path).exists():
+            raise FileExistsError(f"Zielpfad existiert bereits, wird nicht ueberschrieben: {manifest_path}")
         manifest = SessionManifest(
             profile=profile.name,
             dry_run=dry_run,
@@ -808,10 +1347,38 @@ def run_guided_session(
             signal_path=signal_path,
             block=block,
             setup_notes=setup_notes,
+            run_id=run_id or uuid4().hex,
+            timing_qc=determine_timing_qc(legacy=False).to_dict(),
         )
         if manifest.setup_notes is None and ask_setup_notes:
             manifest.setup_notes = prompt_setup_notes(input_fn)
         completed_keys = set()
+
+    # Betriebszustand: ein uebergebener Wert gilt fuer diese Session; sonst der gespeicherte.
+    if operating_state is not None:
+        manifest.operating_state = operating_state.to_dict()
+    op_state = _operating_from_dict(manifest.operating_state)
+    if op_state is not None and op_state.dynamic_eq == "high active":
+        print_fn(
+            "WARNUNG: Dynamic EQ ist aktiv (high active) - alle Messnotizen dieser Session "
+            "tragen diesen Betriebszustand."
+        )
+    # Timing-QC wird immer neu bestimmt, auch bei einer Fortsetzung: fehlt der Wert,
+    # ist er ungueltig oder steht dort OK, gilt ohne belastbaren Nachweis INCONCLUSIVE.
+    # Ein gespeichertes OK wird nie unveraendert uebernommen.
+    # `stored_timing is not None` ist bewusst: bei einer neuen Session ist der Wert noch
+    # nicht gesetzt (keine Meldung). Bei einer Fortsetzung ist er in V2 immer gesetzt
+    # (Schema-Pflicht); die Meldung erscheint dann z. B. beim Herabstufen eines OK.
+    stored_timing = manifest.timing_qc
+    manifest.timing_qc = determine_timing_qc(legacy=manifest.predecessor is not None).to_dict()
+    if stored_timing != manifest.timing_qc and stored_timing is not None:
+        print_fn("Timing-QC gegenueber gespeichertem Stand neu bestimmt (kein Nachweis vorhanden).")
+    gate_hint = (
+        "Phasenabhaengige Auswertungen sind gesperrt."
+        if manifest.timing_qc["status"] != TimingQcStatus.OK.value
+        else "Phasenabhaengige Auswertung freigegeben."
+    )
+    print_fn(f"Timing-QC: {manifest.timing_qc['status']} - {manifest.timing_qc['reason']}. {gate_hint}")
 
     if block_spec is not None:
         print_fn(f"Block {block_spec.number}: {block_spec.description}")
@@ -881,6 +1448,11 @@ def run_guided_session(
                 break
 
             if action == UserAction.REPEAT:
+                if not dry_run:
+                    try:
+                        known_uuids = {m.uuid for m in client.list_measurements()}
+                    except RewApiError as exc:
+                        print_fn(f"WARNUNG: REW-Messungsliste nach Wiederholung nicht abrufbar ({exc}); UUID-Ausgangsstand bleibt unveraendert.")
                 continue
 
             # action == CONFIRM
@@ -919,8 +1491,15 @@ def run_guided_session(
                 signal_path,
                 block,
                 manifest.setup_notes,
+                operating_state=op_state,
             )
             write_notes_sidecar(notes_dir, name, notes_text)
+
+            metadata_findings: list[MetadataFinding] = []
+            if "rew_meta_raw" in qc_data:
+                metadata_findings = check_rew_metadata(qc_data["rew_meta_raw"])
+                for finding in metadata_findings:
+                    print_fn(f"METADATEN {finding.problem.upper()}: {finding.message}")
 
             uuid = id_result.new_measurements[0].uuid if id_result.status == "ok" else None
             manifest.add(
@@ -937,6 +1516,9 @@ def run_guided_session(
                     notes_text=notes_text,
                     timestamp=_now_iso(),
                     status="completed",
+                    metadata_findings=[
+                        {"field": f.field, "problem": f.problem, "message": f.message} for f in metadata_findings
+                    ],
                 )
             )
             manifest.write(manifest_path)
@@ -997,7 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port-state",
         default="stopfen_ein",
-        choices=["stopfen_ein", "offen"],
+        choices=["stopfen_ein", "teilstopfen", "offen"],
         help="KEF-Bassreflex-Portzustand fuer das Notes-Protokoll (Standard: stopfen_ein, siehe raum_akustik.md Abschnitt 3)",
     )
     parser.add_argument(
@@ -1005,6 +1587,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="USB",
         choices=["USB", "Bluetooth"],
         help="Messweg fuer das Notes-Protokoll (Standard: USB, siehe raum_akustik.md Abschnitt 15.1)",
+    )
+    parser.add_argument(
+        "--door-state",
+        default=None,
+        help="Tuer-/Raumzustand der Messung, z. B. 5cm_keil (Pflicht fuer neue Messungen; sonst interaktive Abfrage)",
+    )
+    parser.add_argument(
+        "--saxx-lpf",
+        default=None,
+        choices=list(SAXX_LPF_CHOICES),
+        help="Saxx-Tiefpass: aus oder aktiv (Pflicht fuer neue Messungen; sonst interaktive Abfrage)",
+    )
+    parser.add_argument(
+        "--dynamic-eq",
+        default=None,
+        choices=list(DYNAMIC_EQ_CHOICES),
+        help="Dynamic-EQ-Status: aus oder high active (Pflicht fuer neue Messungen; high active erzeugt eine Warnung)",
     )
     parser.add_argument("--manifest", default="session_manifest.json", help="Pfad fuer das Session-Manifest (JSON)")
     parser.add_argument(
@@ -1015,7 +1614,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Setzt eine unterbrochene Session fort: liest das angegebene session_manifest.json, "
             "uebernimmt Profil, --aba, --port-state und --signal-path daraus (die entsprechenden "
             "CLI-Flags werden ignoriert), ueberspringt Schritte mit status 'completed' und schreibt "
-            "weiter in dieselbe Datei (--manifest wird ignoriert)"
+            "weiter in dieselbe Datei. Ein Legacy-Manifest (ohne manifest_version) wird nur gelesen: die "
+            "Fortsetzung entsteht in einem neuen Manifest mit neuer run_id (--manifest bzw. Standardname)"
         ),
     )
     parser.add_argument(
@@ -1031,6 +1631,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     resume_manifest: SessionManifest | None = None
+    predecessor: dict[str, Any] | None = None
+    run_id: str | None = None
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    manifest_explicit = any(t == "--manifest" or t.startswith("--manifest=") for t in tokens)
     if args.resume:
         try:
             resume_manifest = load_manifest(args.resume)
@@ -1042,8 +1646,29 @@ def main(argv: list[str] | None = None) -> int:
         use_aba = resume_manifest.use_aba
         port_state = resume_manifest.port_state or args.port_state
         signal_path = resume_manifest.signal_path or args.signal_path
-        manifest_path = args.resume
         block = resume_manifest.block
+        if resume_manifest.is_legacy:
+            # Legacy-Manifest: nur lesend laden, Fortsetzung in ein separates Manifest.
+            legacy_path = Path(args.resume)
+            run_id = uuid4().hex
+            predecessor = {
+                "path": str(legacy_path.resolve()),
+                "sha256": hashlib.sha256(legacy_path.read_bytes()).hexdigest(),
+                "manifest_version": resume_manifest.manifest_version,
+                "entries_inherited": len(resume_manifest.entries),
+            }
+            manifest_path = (
+                args.manifest
+                if manifest_explicit
+                else str(legacy_path.with_name(f"{legacy_path.stem}_fortsetzung_{run_id[:8]}.json"))
+            )
+            print(
+                f"Legacy-Manifest (ohne manifest_version): nur lesend geladen, "
+                f"{len(resume_manifest.entries)} historische Eintraege bleiben unveraendert. "
+                f"Fortsetzung in neues Manifest: {manifest_path}"
+            )
+        else:
+            manifest_path = args.resume
     else:
         profile_name = args.profile
         use_aba = args.aba
@@ -1069,6 +1694,34 @@ def main(argv: list[str] | None = None) -> int:
     if use_aba and profile_name != "wohnzimmer":
         parser.error("--aba ist derzeit nur fuer --profile wohnzimmer spezifiziert")
 
+    # Pflicht-Betriebszustand. Eine gespeicherte Session gibt ihn vor; CLI-Werte
+    # duerfen ihn nur bestaetigen, nicht ueberschreiben.
+    stored_state = None if resume_manifest is None or resume_manifest.is_legacy else _operating_from_dict(
+        resume_manifest.operating_state
+    )
+    given: dict[str, str | None] = {
+        "door_state": args.door_state,
+        "saxx_lpf": args.saxx_lpf,
+        "dynamic_eq": args.dynamic_eq,
+    }
+    if stored_state is not None:
+        for key, value in given.items():
+            if value is not None and value != getattr(stored_state, key):
+                parser.error(f"--{key.replace('_', '-')} widerspricht dem gespeicherten Betriebszustand der Session")
+        given = stored_state.to_dict()  # type: ignore[assignment]
+
+    # Dieselbe Pflicht im Dry-run wie im regulaeren Ablauf: fehlende Angaben werden
+    # abgefragt, es gibt keine stillen Defaults und keine Session ohne Betriebszustand.
+    try:
+        operating_state = prompt_operating_state(input, print, **given)
+    except OperatingStateError as exc:
+        print(f"Abbruch: {exc}", file=sys.stderr)
+        return 2
+
+    is_resume_in_place = resume_manifest is not None and not resume_manifest.is_legacy
+    if not is_resume_in_place and Path(manifest_path).exists():
+        parser.error(f"Zielpfad existiert bereits, wird nicht ueberschrieben: {manifest_path}")
+
     profile = PROFILES[profile_name]
     client = ReadOnlyRewClient(base_url=args.base_url)
 
@@ -1087,6 +1740,9 @@ def main(argv: list[str] | None = None) -> int:
         block=block,
         setup_notes=args.notes,
         ask_setup_notes=args.notes is None and resume_manifest is None and not args.dry_run,
+        operating_state=operating_state,
+        predecessor=predecessor,
+        run_id=run_id,
     )
     print(f"Manifest geschrieben nach: {manifest_path} ({len(manifest.entries)} Eintraege)")
     return 0

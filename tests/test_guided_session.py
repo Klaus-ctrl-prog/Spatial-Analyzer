@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import numpy as np
@@ -5,12 +6,20 @@ import pytest
 
 from spatial_analyzer.guided_session import (
     BLOCKS,
+    MANIFEST_VERSION,
     PROFILES,
     IdDetectionResult,
+    ManifestReadError,
+    OperatingState,
+    OperatingStateError,
+    PhaseEvaluationBlocked,
     QcThresholds,
     SessionManifest,
     SessionManifestEntry,
     SessionStep,
+    TimingQcResult,
+    TimingQcStatus,
+    add_nachtrag,
     build_measurement_name,
     build_notes_text,
     build_parser,
@@ -18,16 +27,21 @@ from spatial_analyzer.guided_session import (
     check_aba_drift,
     check_clipping,
     check_pretrigger_noise,
+    check_rew_metadata,
     detect_new_measurement,
+    determine_timing_qc,
     load_manifest,
     main,
     parse_user_action,
+    prompt_operating_state,
     prompt_setup_notes,
     prompt_smart453_preset,
     prompt_user_action,
     read_kef_snapshot,
+    require_phase_evaluation,
     resolve_block,
     run_guided_session,
+    validate_operating_state,
     write_notes_sidecar,
 )
 from spatial_analyzer.rew_client import ReadOnlyRewClient, RewApiError, RewMeasurementMeta
@@ -812,7 +826,7 @@ class TestResume:
 
         # Widerspruechliche CLI-Flags muessen von --resume uebersteuert werden.
         exit_code = main(
-            ["--resume", str(path), "--dry-run", "--profile", "smart453",
+            ["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--profile", "smart453",
              "--port-state", "stopfen_ein", "--signal-path", "USB", "--notes-dir", str(tmp_path / "notes")]
         )
         assert exit_code == 0
@@ -940,7 +954,7 @@ class TestBlocks:
         exp = _BLOCK_EXPECTED[block]
         path = tmp_path / "m.json"
         exit_code = main(
-            ["--block", str(block), "--dry-run", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
+            ["--block", str(block), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
         )
         assert exit_code == 0
         loaded = load_manifest(path)
@@ -952,7 +966,7 @@ class TestBlocks:
 
     def test_main_block_accepts_matching_explicit_port_state(self, tmp_path):
         exit_code = main(
-            ["--block", "3", "--port-state", "offen", "--aba", "--dry-run",
+            ["--block", "3", "--port-state", "offen", "--aba", "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus",
              "--manifest", str(tmp_path / "m.json"), "--notes-dir", str(tmp_path / "n")]
         )
         assert exit_code == 0
@@ -969,7 +983,7 @@ class TestBlocks:
     )
     def test_main_rejects_contradicting_or_invalid_block_flags(self, tmp_path, argv):
         with pytest.raises(SystemExit):
-            main([*argv, "--dry-run", "--manifest", str(tmp_path / "m.json")])
+            main([*argv, "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--manifest", str(tmp_path / "m.json")])
         assert not (tmp_path / "m.json").exists()
 
     def test_parser_block_default_is_none(self):
@@ -994,7 +1008,7 @@ class TestSetupNotes:
         path = tmp_path / "m.json"
         note = "Phasenkorrektur AUS, KEF HP 90 Hz, Saxx LP 80 Hz, Phase 135, Pegelregler -3 dB"
         exit_code = main(
-            ["--block", "2", "--notes", note, "--dry-run", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
+            ["--block", "2", "--notes", note, "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--manifest", str(path), "--notes-dir", str(tmp_path / "n")]
         )
         assert exit_code == 0
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1057,7 +1071,7 @@ class TestSetupNotes:
         assert load_manifest(path).block == 3
 
         # Resume ohne --notes: Block und Notiz bleiben erhalten.
-        assert main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")]) == 0
+        assert main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")]) == 0
         loaded = load_manifest(path)
         assert loaded.block == 3 and loaded.setup_notes == "Stand 1"
         assert loaded.port_state == "offen" and loaded.use_aba is True
@@ -1072,7 +1086,7 @@ class TestSetupNotes:
             PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
             use_aba=True, port_state="stopfen_ein", block=2, setup_notes="alt",
         )
-        main(["--resume", str(path), "--notes", "neu", "--dry-run", "--notes-dir", str(tmp_path / "n")])
+        main(["--resume", str(path), "--notes", "neu", "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
         assert load_manifest(path).setup_notes == "neu"
 
     def test_resume_continues_block_without_duplicates(self, tmp_path):
@@ -1085,7 +1099,7 @@ class TestSetupNotes:
         )
         assert [e.measurement_name for e in load_manifest(path).entries] == ["P01_L", "P01_R"]
         # Session 2 per --resume (Dry-Run): Rest von Block 1, keine Duplikate.
-        main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")])
+        main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
         names = [e.measurement_name for e in load_manifest(path).entries]
         assert len(names) == 22 and len(set(names)) == 22
         assert names[:3] == ["P01_L", "P01_R", "P02_L"]
@@ -1121,8 +1135,792 @@ class TestCli:
 
     def test_main_dry_run_end_to_end(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
-        exit_code = main(["--profile", "wohnzimmer", "--dry-run", "--manifest", "m.json", "--notes-dir", "notes"])
+        exit_code = main(["--profile", "wohnzimmer", "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--manifest", "m.json", "--notes-dir", "notes"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Manifest geschrieben" in captured.out
         assert (tmp_path / "m.json").exists()
+
+
+def test_port_state_parser_accepts_teilstopfen():
+    from spatial_analyzer.guided_session import build_parser
+
+    args = build_parser().parse_args(["--port-state", "teilstopfen"])
+    assert args.port_state == "teilstopfen"
+
+
+def test_repeat_refreshes_known_rew_uuids_before_next_confirmation(tmp_path):
+    client = _scripted_client([[], ["old"], ["old", "new"]], uuids=("old", "new"))
+    manifest = _run(
+        PROFILES["wohnzimmer"], client, tmp_path / "manifest.json", tmp_path,
+        ["r", "", "q"],
+    )
+    assert len(manifest.entries) == 1
+    assert manifest.entries[0].uuid == "new"
+    assert manifest.entries[0].detection_status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Paket B (Rev. 26): Timing-QC, REW-Metadaten, Betriebszustand, Manifest-Version,
+# Legacy-Fortsetzung, Nachtraege. Bestehende Tests oben bleiben unveraendert.
+# ---------------------------------------------------------------------------
+
+
+class TestTimingQc:
+    def test_status_values_are_separate_from_no_harm(self):
+        assert [s.value for s in TimingQcStatus] == ["OK", "INCONCLUSIVE"]
+
+    @pytest.mark.parametrize("legacy", [True, False])
+    def test_timing_is_never_ok_without_documented_field(self, legacy):
+        result = determine_timing_qc(legacy=legacy)
+        assert result.status is TimingQcStatus.INCONCLUSIVE
+        assert result.reason
+
+    def test_phase_evaluation_is_blocked_while_inconclusive(self):
+        timing = determine_timing_qc(legacy=False)
+        with pytest.raises(PhaseEvaluationBlocked):
+            require_phase_evaluation(timing)
+
+    def test_phase_evaluation_only_passes_with_ok(self):
+        require_phase_evaluation(TimingQcResult(TimingQcStatus.OK, "nachgewiesen"))
+
+    def test_legacy_timing_is_inconclusive_with_reason(self):
+        result = determine_timing_qc(legacy=True)
+        assert result.status is TimingQcStatus.INCONCLUSIVE
+        assert "Legacy" in result.reason
+
+
+class TestRewMetadataCheck:
+    VALID = {"sampleRate": 48000.0, "micCalPath": "C:\\cal\\UMIK-1 90deg.txt"}
+
+    def test_valid_metadata_has_no_findings(self):
+        assert check_rew_metadata(dict(self.VALID)) == []
+
+    def test_missing_fields_are_reported_not_filled(self):
+        raw: dict = {}
+        findings = check_rew_metadata(raw)
+        assert {(f.field, f.problem) for f in findings} == {("sampleRate", "fehlend"), ("micCalPath", "fehlend")}
+        assert raw == {}  # nichts ergaenzt
+
+    def test_empty_cal_path_counts_as_missing(self):
+        findings = check_rew_metadata({"sampleRate": 48000.0, "micCalPath": "   "})
+        assert [(f.field, f.problem) for f in findings] == [("micCalPath", "fehlend")]
+
+    def test_wrong_sample_rate_is_contradictory(self):
+        findings = check_rew_metadata({"sampleRate": 44100.0, "micCalPath": "UMIK-1 90deg.txt"})
+        assert [(f.field, f.problem) for f in findings] == [("sampleRate", "widerspruechlich")]
+
+    def test_non_numeric_sample_rate_is_invalid(self):
+        findings = check_rew_metadata({"sampleRate": "48000", "micCalPath": "UMIK-1 90deg.txt"})
+        assert [(f.field, f.problem) for f in findings] == [("sampleRate", "ungueltig")]
+
+    def test_cal_file_not_umik_is_contradictory(self):
+        findings = check_rew_metadata({"sampleRate": 48000.0, "micCalPath": "other_mic_90deg.txt"})
+        assert [(f.field, f.problem) for f in findings] == [("micCalPath", "widerspruechlich")]
+
+    def test_umik_without_90_degree_is_contradictory(self):
+        findings = check_rew_metadata({"sampleRate": 48000.0, "micCalPath": "UMIK-1 0deg.txt"})
+        assert [(f.field, f.problem) for f in findings] == [("micCalPath", "widerspruechlich")]
+
+    def test_messages_do_not_expose_cal_path(self):
+        findings = check_rew_metadata({"sampleRate": 48000.0, "micCalPath": "C:\\Users\\privat\\x.txt"})
+        assert all("privat" not in f.message for f in findings)
+
+    def test_metadata_check_does_not_change_timing_status(self):
+        before = determine_timing_qc(legacy=False)
+        check_rew_metadata({"sampleRate": 48000.0, "micCalPath": "UMIK-1 90deg.txt"})
+        assert determine_timing_qc(legacy=False) == before
+
+
+class TestOperatingState:
+    def test_valid_state_has_no_problems(self):
+        assert validate_operating_state("5cm_keil", "aus", "aus") == []
+
+    def test_missing_or_invalid_values_are_reported(self):
+        problems = validate_operating_state("  ", "vielleicht", None)
+        assert len(problems) == 3
+
+    def test_high_active_adds_warning_line(self):
+        state = OperatingState("5cm_keil", "aktiv", "high active")
+        assert any(line.startswith("WARNUNG: Dynamic EQ") for line in state.notes_lines())
+
+    def test_aus_has_no_warning_line(self):
+        state = OperatingState("5cm_keil", "aus", "aus")
+        assert not any("WARNUNG" in line for line in state.notes_lines())
+
+    def test_given_values_are_used_without_prompting(self):
+        def no_input(_):
+            raise AssertionError("keine Abfrage erwartet")
+
+        state = prompt_operating_state(no_input, lambda _: None, door_state="5cm_keil", saxx_lpf="aus", dynamic_eq="aus")
+        assert state == OperatingState("5cm_keil", "aus", "aus")
+
+    def test_missing_values_are_prompted(self):
+        answers = iter(["5cm_keil", "aktiv", "high active"])
+        state = prompt_operating_state(lambda _: next(answers), lambda _: None)
+        assert state == OperatingState("5cm_keil", "aktiv", "high active")
+
+    def test_three_invalid_answers_abort_without_default(self):
+        answers = iter(["", "vielleicht", "nein"])
+        with pytest.raises(OperatingStateError):
+            prompt_operating_state(lambda _: next(answers), lambda _: None, door_state="5cm_keil")
+
+    def test_notes_without_state_are_unchanged(self):
+        text = build_notes_text("P01", "L", None, None, None, "stopfen_ein", "USB")
+        assert "Dynamic EQ" not in text and "Tuer-Zustand" not in text
+
+    def test_notes_with_state_contain_all_lines(self):
+        state = OperatingState("5cm_keil", "aktiv", "high active")
+        text = build_notes_text("P01", "L", None, None, None, "stopfen_ein", "USB", operating_state=state)
+        assert "Tuer-Zustand: 5cm_keil" in text
+        assert "Saxx-LPF: aktiv" in text
+        assert "Dynamic EQ: high active" in text
+        assert "WARNUNG" in text
+
+
+class TestManifestVersioning:
+    def test_new_manifest_is_current_version_and_has_run_id_after_session(self, tmp_path):
+        manifest = _run(PROFILES["wohnzimmer"], _scripted_client([[]]), tmp_path / "m.json", tmp_path, ["q"])
+        assert manifest.manifest_version == MANIFEST_VERSION
+        assert manifest.run_id
+        assert manifest.timing_qc["status"] == "INCONCLUSIVE"
+        assert not manifest.is_legacy
+
+    def test_legacy_file_without_version_loads_as_legacy_without_filled_fields(self, tmp_path):
+        path = tmp_path / "legacy.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "entries": []}), encoding="utf-8")
+        loaded = load_manifest(path)
+        assert loaded.is_legacy
+        assert loaded.run_id is None
+        assert loaded.operating_state is None
+        assert loaded.timing_qc is None
+        assert loaded.nachtraege == []
+
+    def test_entries_without_metadata_findings_load_with_empty_list(self, tmp_path):
+        path = tmp_path / "legacy.json"
+        path.write_text(
+            json.dumps({"profile": "wohnzimmer", "entries": [{"measurement_name": "P01_L", "position_id": "P01", "channel": "L", "aba_state": None, "uuid": "u1", "detection_status": "ok", "qc_findings": [], "kef_snapshot": None, "smart453_preset": None, "notes_text": "x", "timestamp": "t"}]}),
+            encoding="utf-8",
+        )
+        loaded = load_manifest(path)
+        assert loaded.entries[0].metadata_findings == []
+
+    def test_paket_b_fields_round_trip(self, tmp_path):
+        manifest = SessionManifest(
+            profile="wohnzimmer",
+            dry_run=True,
+            created_at="t0",
+            run_id="abc",
+            operating_state=OperatingState("5cm_keil", "aus", "aus").to_dict(),
+            timing_qc=determine_timing_qc(legacy=False).to_dict(),
+        )
+        path = tmp_path / "m.json"
+        manifest.write(path)
+        loaded = load_manifest(path)
+        assert loaded.run_id == "abc"
+        assert loaded.operating_state == {"door_state": "5cm_keil", "saxx_lpf": "aus", "dynamic_eq": "aus"}
+        assert loaded.timing_qc["status"] == "INCONCLUSIVE"
+        assert not loaded.is_legacy
+
+
+class TestNachtrag:
+    def _manifest_with_entry(self):
+        manifest = SessionManifest(profile="wohnzimmer", dry_run=False, created_at="t0")
+        manifest.add(
+            SessionManifestEntry(
+                measurement_name="P01_L", position_id="P01", channel="L", aba_state=None, uuid="u1",
+                detection_status="ok", qc_findings=[], kef_snapshot=None, smart453_preset=None,
+                notes_text="x", timestamp="t1",
+            )
+        )
+        return manifest
+
+    def test_nachtrag_is_separate_and_marked_and_entries_unchanged(self):
+        manifest = self._manifest_with_entry()
+        before = [e.to_dict() for e in manifest.entries]
+        item = add_nachtrag(manifest, "P01_L", "Tuer war offen", timestamp="2026-11-26T10:00:00+00:00")
+        assert item["source"] == "nachtrag"
+        assert item["timestamp"] == "2026-11-26T10:00:00+00:00"
+        assert manifest.nachtraege == [item]
+        assert [e.to_dict() for e in manifest.entries] == before
+
+    def test_nachtrag_for_unknown_measurement_is_refused(self):
+        with pytest.raises(ValueError):
+            add_nachtrag(self._manifest_with_entry(), "P99_X", "irgendwas")
+
+    def test_empty_nachtrag_is_refused(self):
+        with pytest.raises(ValueError):
+            add_nachtrag(self._manifest_with_entry(), "P01_L", "   ")
+
+
+def _legacy_manifest_file(tmp_path, name="legacy.json"):
+    path = tmp_path / name
+    path.write_text(
+        json.dumps(
+            {
+                "profile": "wohnzimmer",
+                "dry_run": False,
+                "created_at": "t0",
+                "entries": [
+                    {
+                        "measurement_name": "P01_L", "position_id": "P01", "channel": "L", "aba_state": None,
+                        "uuid": "u1", "detection_status": "ok", "qc_findings": [], "kef_snapshot": None,
+                        "smart453_preset": None, "notes_text": "historisch", "timestamp": "t1",
+                        "status": "completed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _predecessor_for(path):
+    return {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "manifest_version": 1,
+        "entries_inherited": 1,
+    }
+
+
+class TestLegacyContinuation:
+    def test_legacy_file_is_never_modified_and_continuation_is_separate(self, tmp_path):
+        legacy_path = _legacy_manifest_file(tmp_path)
+        legacy_bytes = legacy_path.read_bytes()
+        new_path = tmp_path / "fortsetzung.json"
+        client = _scripted_client([["u1"], ["u1", "u2"]])
+
+        _run(
+            PROFILES["wohnzimmer"], client, new_path, tmp_path, ["", "q"],
+            resume=load_manifest(legacy_path), predecessor=_predecessor_for(legacy_path),
+        )
+
+        assert legacy_path.read_bytes() == legacy_bytes  # Legacy unveraendert
+        continued = load_manifest(new_path)
+        assert not continued.is_legacy
+        assert continued.run_id
+        assert continued.predecessor["sha256"] == hashlib.sha256(legacy_bytes).hexdigest()
+        names = [e.measurement_name for e in continued.entries]
+        assert names == ["P01_L", "P01_R"]  # historischer Eintrag uebernommen, nicht dupliziert
+        assert continued.entries[0].notes_text == "historisch"
+        assert continued.timing_qc["status"] == "INCONCLUSIVE"
+
+    def test_legacy_continuation_refuses_existing_target(self, tmp_path):
+        legacy_path = _legacy_manifest_file(tmp_path)
+        existing = tmp_path / "existiert.json"
+        existing.write_text("{}", encoding="utf-8")
+        with pytest.raises(FileExistsError):
+            _run(
+                PROFILES["wohnzimmer"], _scripted_client([[]]), existing, tmp_path, ["q"],
+                resume=load_manifest(legacy_path), predecessor=_predecessor_for(legacy_path),
+            )
+        assert existing.read_text(encoding="utf-8") == "{}"
+
+    def test_legacy_continuation_refuses_legacy_path_as_target(self, tmp_path):
+        legacy_path = _legacy_manifest_file(tmp_path)
+        before = legacy_path.read_bytes()
+        with pytest.raises(FileExistsError):
+            _run(
+                PROFILES["wohnzimmer"], _scripted_client([[]]), legacy_path, tmp_path, ["q"],
+                resume=load_manifest(legacy_path), predecessor=_predecessor_for(legacy_path),
+            )
+        assert legacy_path.read_bytes() == before
+
+    def test_legacy_continuation_requires_predecessor(self, tmp_path):
+        legacy_path = _legacy_manifest_file(tmp_path)
+        with pytest.raises(ValueError):
+            _run(
+                PROFILES["wohnzimmer"], _scripted_client([[]]), tmp_path / "neu.json", tmp_path, ["q"],
+                resume=load_manifest(legacy_path),
+            )
+
+    def test_new_session_refuses_existing_target(self, tmp_path):
+        existing = tmp_path / "vorhanden.json"
+        existing.write_text("{}", encoding="utf-8")
+        with pytest.raises(FileExistsError):
+            _run(PROFILES["wohnzimmer"], _scripted_client([[]]), existing, tmp_path, ["q"])
+        assert existing.read_text(encoding="utf-8") == "{}"
+
+
+class TestPaketBSessionIntegration:
+    def test_missing_rew_metadata_is_reported_and_timing_stays_inconclusive(self, tmp_path):
+        messages = []
+        manifest = _run(
+            PROFILES["wohnzimmer"], _scripted_client([[], ["u1"]]), tmp_path / "m.json", tmp_path, ["", "q"],
+            messages=messages,
+        )
+        fields = {(f["field"], f["problem"]) for f in manifest.entries[0].metadata_findings}
+        assert ("sampleRate", "fehlend") in fields
+        assert ("micCalPath", "fehlend") in fields
+        assert any(m.startswith("METADATEN FEHLEND") for m in messages)
+        assert manifest.timing_qc["status"] == "INCONCLUSIVE"
+
+    def test_high_active_warns_and_state_is_inherited_into_all_notes(self, tmp_path):
+        messages = []
+        state = OperatingState("5cm_keil", "aktiv", "high active")
+        manifest = _run(
+            PROFILES["wohnzimmer"], _scripted_client([[], ["u1"]]), tmp_path / "m.json", tmp_path, ["", "q"],
+            messages=messages, operating_state=state,
+        )
+        assert any(m.startswith("WARNUNG: Dynamic EQ ist aktiv") for m in messages)
+        assert manifest.operating_state == state.to_dict()
+        assert "Dynamic EQ: high active" in manifest.entries[0].notes_text
+        assert "Tuer-Zustand: 5cm_keil" in manifest.entries[0].notes_text
+
+
+class TestPaketBCli:
+    def test_non_dry_run_without_operating_state_aborts_before_any_measurement(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        target = tmp_path / "neu.json"
+        assert main(["--manifest", str(target), "--notes-dir", str(tmp_path / "n")]) == 2
+        assert not target.exists()
+        assert "keine Messung gestartet" in capsys.readouterr().err
+
+    def test_existing_target_is_refused_by_cli(self, tmp_path):
+        existing = tmp_path / "vorhanden.json"
+        existing.write_text("{}", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--manifest", str(existing), "--notes-dir", str(tmp_path / "n")])
+        assert existing.read_text(encoding="utf-8") == "{}"
+
+    def test_invalid_saxx_lpf_choice_is_rejected(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["--saxx-lpf", "vielleicht"])
+
+    def test_legacy_resume_dry_run_writes_only_separate_manifest(self, tmp_path, capsys):
+        legacy_path = _legacy_manifest_file(tmp_path)
+        before = legacy_path.read_bytes()
+        assert main(["--resume", str(legacy_path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")]) == 0
+        assert legacy_path.read_bytes() == before
+        out = capsys.readouterr().out
+        assert "nur lesend geladen" in out
+        continued = [p for p in tmp_path.glob("legacy_fortsetzung_*.json")]
+        assert len(continued) == 1
+        loaded = load_manifest(continued[0])
+        assert not loaded.is_legacy
+        assert loaded.predecessor["path"] == str(legacy_path.resolve())
+
+    def test_resume_of_current_manifest_rejects_conflicting_operating_state(self, tmp_path):
+        path = tmp_path / "m.json"
+        _run(
+            PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+            operating_state=OperatingState("5cm_keil", "aus", "aus"),
+        )
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--door-state", "andere_tuer", "--notes-dir", str(tmp_path / "n")])
+
+
+def _v2_manifest_file(tmp_path, name="v2.json"):
+    """Echte Version-2-Datei aus einer Session (ohne Eintraege) mit Betriebszustand."""
+    path = tmp_path / name
+    _run(
+        PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+        operating_state=OperatingState("5cm_keil", "aus", "aus"),
+    )
+    return path
+
+
+def _write_mutated(tmp_path, source, updates, name="mut.json"):
+    data = json.loads(source.read_text(encoding="utf-8"))
+    for key, value in updates.items():
+        if value is _REMOVE:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    target = tmp_path / name
+    target.write_text(json.dumps(data), encoding="utf-8")
+    return target
+
+
+_REMOVE = object()
+
+
+class TestSchemaValidation:
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"operating_state": {"door_state": 5, "saxx_lpf": "aus", "dynamic_eq": "aus"}},
+            {"operating_state": {"door_state": "x", "saxx_lpf": "vielleicht", "dynamic_eq": "aus"}},
+            {"operating_state": {"door_state": "x", "saxx_lpf": "aus", "dynamic_eq": "aus", "extra": 1}},
+            {"operating_state": {"door_state": "x", "saxx_lpf": "aus"}},
+            {"operating_state": {"door_state": "", "saxx_lpf": "aus", "dynamic_eq": "aus"}},
+            {"operating_state": ["x"]},
+            {"timing_qc": {"status": "FERTIG", "reason": "x"}},
+            {"timing_qc": {"status": "OK", "reason": "x", "extra": 1}},
+            {"timing_qc": ["x"]},
+            {"run_id": ""},
+            {"run_id": 7},
+            {"run_id": _REMOVE},
+            {"nachtraege": _REMOVE},
+            {"nachtraege": [1, "x"]},
+            {"nachtraege": [{"source": "fremd", "target": "P01_L", "text": "x", "timestamp": "t"}]},
+            {"nachtraege": [{"source": "nachtrag", "target": "P01_L", "text": "x"}]},
+            {"predecessor": {"path": "x", "sha256": "nicht-hex"}},
+            {"predecessor": {"path": "x"}},
+            {"predecessor": "x"},
+            {"block": 3, "use_aba": True, "port_state": None},
+            {"block": 3, "use_aba": False, "port_state": "offen"},
+            {"block": True},
+            {"block": 99},
+            {"block": "x"},
+            {"profile": "smart453", "block": 1, "use_aba": False, "port_state": "stopfen_ein"},
+            {"profile": "smart453", "use_aba": True},
+            {"port_state": "unbekannt"},
+            {"signal_path": "Funk"},
+            {"created_at": 5},
+            {"dry_run": "nein"},
+            {"use_aba": "ja"},
+            {"dry_run": _REMOVE},
+            {"setup_notes": 5},
+        ],
+    )
+    def test_invalid_version2_fields_are_read_errors(self, tmp_path, updates):
+        source = _v2_manifest_file(tmp_path)
+        bad = _write_mutated(tmp_path, source, updates)
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+        with pytest.raises(SystemExit):
+            main(["--resume", str(bad), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus",
+                  "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"run_id": "abc"},
+            {"operating_state": {"door_state": "x", "saxx_lpf": "aus", "dynamic_eq": "aus"}},
+            {"timing_qc": {"status": "INCONCLUSIVE", "reason": "x"}},
+            {"nachtraege": [{"source": "nachtrag", "target": "P01_L", "text": "x", "timestamp": "t"}]},
+            {"block": 3, "use_aba": False, "port_state": "offen"},
+            {"use_aba": True, "profile": "smart453"},
+        ],
+    )
+    def test_legacy_with_version2_fields_or_contradictions_is_read_error(self, tmp_path, updates):
+        legacy = _legacy_manifest_file(tmp_path)
+        bad = _write_mutated(tmp_path, legacy, updates, name="legacy_mut.json")
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+
+    @pytest.mark.parametrize(
+        "entry_updates",
+        [
+            {"status": "kaputt"},
+            {"position_id": 1},
+            {"measurement_name": ""},
+            {"qc_findings": "x"},
+            {"metadata_findings": {"a": 1}},
+            {"kef_snapshot": "text"},
+            {"channel": 5},
+            {"uuid": ["u1"]},
+        ],
+    )
+    def test_invalid_entry_fields_are_read_errors_in_both_versions(self, tmp_path, entry_updates):
+        legacy = _legacy_manifest_file(tmp_path)
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+        data["entries"][0].update(entry_updates)
+        bad = tmp_path / "entry_mut.json"
+        bad.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+
+    def test_valid_version2_file_still_loads(self, tmp_path):
+        loaded = load_manifest(_v2_manifest_file(tmp_path))
+        assert not loaded.is_legacy
+        assert loaded.operating_state == {"door_state": "5cm_keil", "saxx_lpf": "aus", "dynamic_eq": "aus"}
+
+    def test_eof_in_operating_state_prompt_becomes_operating_state_error(self):
+        def closed_stdin(_):
+            raise EOFError
+
+        with pytest.raises(OperatingStateError):
+            prompt_operating_state(closed_stdin, lambda _: None)
+
+    def test_closed_stdin_in_real_run_exits_2_without_session(self, tmp_path, monkeypatch):
+        def closed(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", closed)
+        target = tmp_path / "eof.json"
+        assert main(["--manifest", str(target), "--notes-dir", str(tmp_path / "n")]) == 2
+        assert not target.exists()
+
+    def test_closed_stdin_in_dry_run_exits_2_without_session(self, tmp_path, monkeypatch):
+        def closed(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", closed)
+        target = tmp_path / "eof_dry.json"
+        assert main(["--dry-run", "--manifest", str(target), "--notes-dir", str(tmp_path / "n")]) == 2
+        assert not target.exists()
+
+
+class TestPaketBCorrections:
+    def test_v2_with_null_timing_qc_is_read_error_and_not_redetermined_on_resume(self, tmp_path):
+        # Befund F: `timing_qc: null` in Version 2 wird nicht mehr akzeptiert und beim
+        # --resume nicht stillschweigend neu bestimmt (vorher: Neubestimmung).
+        path = tmp_path / "m.json"
+        _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["timing_qc"] = None
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus",
+                  "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
+
+    def test_v2_with_null_operating_state_loads_and_is_asked_again_on_resume(self, tmp_path):
+        # Bewusste V2-Regel: operating_state null = unvollstaendige Session; beim --resume
+        # wird der Betriebszustand verbindlich neu abgefragt.
+        path = tmp_path / "m.json"
+        _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["operating_state"] = None
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        loaded = load_manifest(path)
+        assert not loaded.is_legacy and loaded.operating_state is None
+
+        resumed = _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+                       resume=loaded, operating_state=OperatingState("5cm_keil", "aus", "aus"))
+        assert resumed.operating_state == {"door_state": "5cm_keil", "saxx_lpf": "aus", "dynamic_eq": "aus"}
+
+    def test_v2_null_operating_state_on_cli_resume_without_answers_is_refused(self, tmp_path, monkeypatch, capsys):
+        # Ohne Angaben und mit geschlossener Eingabe darf ein Resume mit null-Betriebszustand nicht starten.
+        path = tmp_path / "m.json"
+        _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["operating_state"] = None
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        def closed(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", closed)
+        before = path.read_text(encoding="utf-8")
+        assert main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")]) == 2
+        assert path.read_text(encoding="utf-8") == before
+        assert "keine Messung gestartet" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("missing_or_bad", ["float_1_0", "missing"])
+    def test_v2_predecessor_manifest_version_must_be_integer_and_present(self, tmp_path, missing_or_bad):
+        # Befund B: JSON 1.0 wurde wegen 1.0 == 1 stillschweigend akzeptiert; in Version 2 ist das Feld Pflicht.
+        legacy = _legacy_manifest_file(tmp_path)
+        predecessor = _predecessor_for(legacy)
+        if missing_or_bad == "float_1_0":
+            predecessor["manifest_version"] = 1.0
+        else:
+            predecessor.pop("manifest_version")
+        source = _v2_manifest_file(tmp_path)
+        bad = _write_mutated(tmp_path, source, {"predecessor": predecessor}, name="pred.json")
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+
+    def test_v2_entries_is_mandatory(self, tmp_path):
+        # Befund A: `entries` ist in Version 2 striktes Pflichtfeld.
+        bad = _write_mutated(tmp_path, _v2_manifest_file(tmp_path), {"entries": _REMOVE}, name="noentries.json")
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"run_id": None},
+            {"operating_state": None},
+            {"timing_qc": None},
+            {"predecessor": None},
+            {"nachtraege": []},
+        ],
+    )
+    def test_legacy_v2_only_fields_null_or_empty_are_rejected(self, tmp_path, updates):
+        # Befund I: V2-only-Felder in Legacy werden auch bei null/leer zurueckgewiesen.
+        bad = _write_mutated(tmp_path, _legacy_manifest_file(tmp_path), updates, name="legacy_null.json")
+        with pytest.raises(ManifestReadError):
+            load_manifest(bad)
+
+    def test_legacy_block_without_companion_fields_is_not_a_contradiction(self, tmp_path):
+        # Befund D: fehlende Block-Begleitfelder in Legacy sind kein Widerspruch.
+        path = tmp_path / "legacy_block.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "block": 1, "entries": []}), encoding="utf-8")
+        loaded = load_manifest(path)
+        assert loaded.block == 1 and loaded.is_legacy
+
+    @pytest.mark.parametrize(
+        "bad_state",
+        [
+            ("5cm_keil", None, "aus"),
+            ("5cm_keil", "aus", None),
+            (None, "aus", "aus"),
+            ("", "aus", "aus"),
+            ("   ", "aus", "aus"),
+            (5, "aus", "aus"),
+            ("5cm_keil", "", "aus"),
+            ("5cm_keil", "aus", ""),
+            ("5cm_keil", "aus", "unbekannt"),
+        ],
+    )
+    def test_operating_state_is_strict_at_function_level(self, bad_state):
+        # Befunde E/H: direkte Konstruktion ohne CLI/Manifest wird ebenfalls streng geprueft.
+        with pytest.raises(OperatingStateError):
+            OperatingState(*bad_state)
+
+    @pytest.mark.parametrize("bad_raw", [["sampleRate", 48000], "UMIK-1 90deg.txt", 5])
+    def test_rew_metadata_wrong_input_type_is_rejected(self, bad_raw):
+        # Befund C: Eingabetyp wird explizit geprueft.
+        with pytest.raises(TypeError):
+            check_rew_metadata(bad_raw)
+
+    def test_rew_metadata_none_still_reports_missing_fields(self):
+        assert {f.field for f in check_rew_metadata(None)} == {"sampleRate", "micCalPath"}
+
+    @pytest.mark.parametrize("name", ["UMIK-2 90deg.txt", "umik-2_90.txt", "UMIK-10 90deg.txt"])
+    def test_umik2_or_other_umik_does_not_pass_umik1_plausibility(self, name):
+        # Befund K: UMIK-2 darf die UMIK-1-Pruefung nicht bestehen.
+        findings = check_rew_metadata({"sampleRate": 48000.0, "micCalPath": name})
+        assert [(f.field, f.problem) for f in findings] == [("micCalPath", "widerspruechlich")]
+
+    @pytest.mark.parametrize(
+        "finding",
+        [
+            "kein Objekt",
+            {"field": "sampleRate", "problem": "fehlend"},
+            {"field": "sampleRate", "problem": "fehlend", "message": "x", "extra": 1},
+            {"field": 5, "problem": "fehlend", "message": "x"},
+            {"field": "sampleRate", "problem": "kaputt", "message": "x"},
+            {"field": "sampleRate", "problem": "fehlend", "message": None},
+            {"field": "", "problem": "fehlend", "message": "x"},
+        ],
+    )
+    def test_invalid_metadata_findings_items_are_read_errors(self, tmp_path, finding):
+        # Befund L: jedes Element von metadata_findings wird strukturell validiert.
+        path = tmp_path / "mf.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "entries": [self._entry(metadata_findings=[finding])]}),
+                        encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+
+    def test_resume_v2_stored_ok_without_proof_is_downgraded(self, tmp_path):
+        path = tmp_path / "m.json"
+        _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["timing_qc"] = {"status": "OK", "reason": "von Hand eingetragen"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        messages = []
+        resumed = _run(PROFILES["wohnzimmer"], _scripted_client([[]]), path, tmp_path, ["q"],
+                       resume=load_manifest(path), messages=messages)
+        assert resumed.timing_qc["status"] == "INCONCLUSIVE"
+        assert any("neu bestimmt" in m for m in messages)
+
+    @pytest.mark.parametrize("bad_version", ["2", 99, 1.5, True, None, [2]])
+    def test_invalid_manifest_version_is_a_read_error(self, tmp_path, bad_version):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "manifest_version": bad_version, "entries": []}),
+                        encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+
+    def test_invalid_manifest_version_in_cli_is_reported_as_read_error(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "manifest_version": "2", "entries": []}),
+                        encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus", "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
+        assert path.read_text(encoding="utf-8").count('"2"') == 1  # unveraendert
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            {"profile": "wohnzimmer", "entries": 5},
+            {"profile": "wohnzimmer", "entries": [5]},
+            {"profile": "wohnzimmer", "entries": ["x"]},
+            {"profile": ["wohnzimmer"], "entries": []},
+            {"profile": None, "entries": []},
+        ],
+    )
+    def test_malformed_entries_or_profile_are_read_errors_in_cli(self, tmp_path, content):
+        path = tmp_path / "kaputt.json"
+        path.write_text(json.dumps(content), encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+        # CLI: klare Fehlermeldung ueber parser.error, kein Traceback (kein TypeError/AttributeError).
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--notes-dir", str(tmp_path / "n")])
+
+    @staticmethod
+    def _entry(**overrides):
+        base = {
+            "measurement_name": "P01_L", "position_id": "P01", "channel": "L", "aba_state": None,
+            "uuid": "u1", "detection_status": "ok", "qc_findings": [], "kef_snapshot": None,
+            "smart453_preset": None, "notes_text": "x", "timestamp": "t1", "status": "completed",
+        }
+        base.update(overrides)
+        return base
+
+    @pytest.mark.parametrize("block_value", [99, "x", [1], True])
+    def test_reproduced_invalid_block_is_read_error_not_traceback(self, tmp_path, block_value):
+        path = tmp_path / "block.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "block": block_value, "entries": []}), encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus",
+                  "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
+
+    def test_block_inconsistent_with_use_aba_is_read_error(self, tmp_path):
+        path = tmp_path / "block.json"
+        # Block 1 ist eine L/R-Einzelmessung ohne ABA; use_aba=True widerspricht dem.
+        path.write_text(json.dumps({"profile": "wohnzimmer", "block": 1, "use_aba": True,
+                                    "port_state": "stopfen_ein", "entries": []}), encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+
+    def test_reproduced_position_id_list_is_read_error_not_traceback(self, tmp_path):
+        path = tmp_path / "pos.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "entries": [self._entry(position_id=[])]}),
+                        encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+        with pytest.raises(SystemExit):
+            main(["--resume", str(path), "--dry-run", "--door-state", "5cm_keil", "--saxx-lpf", "aus",
+                  "--dynamic-eq", "aus", "--notes-dir", str(tmp_path / "n")])
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"measurement_name": None},
+            {"measurement_name": ["P01_L"]},
+            {"channel": ["L"]},
+            {"aba_state": {"x": 1}},
+            {"uuid": 42},
+            {"detection_status": []},
+            {"notes_text": None},
+            {"qc_findings": "kaputt"},
+            {"qc_findings": [5]},
+            {"metadata_findings": {"a": 1}},
+            {"kef_snapshot": "text"},
+        ],
+    )
+    def test_invalid_entry_field_types_are_read_errors(self, tmp_path, overrides):
+        path = tmp_path / "entry.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "entries": [self._entry(**overrides)]}),
+                        encoding="utf-8")
+        with pytest.raises(ManifestReadError):
+            load_manifest(path)
+
+    def test_valid_manifest_with_block_and_entries_still_loads(self, tmp_path):
+        path = tmp_path / "ok.json"
+        path.write_text(json.dumps({"profile": "wohnzimmer", "block": 1, "use_aba": False,
+                                    "port_state": "stopfen_ein", "entries": [self._entry()]}),
+                        encoding="utf-8")
+        loaded = load_manifest(path)
+        assert loaded.block == 1 and loaded.entries[0].position_id == "P01"
+
+    def test_dry_run_without_operating_state_is_refused_without_session(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        target = tmp_path / "dry.json"
+        assert main(["--dry-run", "--manifest", str(target), "--notes-dir", str(tmp_path / "n")]) == 2
+        assert not target.exists()
+        assert "keine Messung gestartet" in capsys.readouterr().err

@@ -4,12 +4,15 @@ import pytest
 from spatial_analyzer.biquad_preview import PeakingFilter
 from spatial_analyzer.complex_response import to_complex
 from spatial_analyzer.eq_solver import (
+    CHECKED_SCOPE_LEFT_RIGHT,
+    CHECKED_SCOPE_NONE,
     ModeConfirmation,
     propose_broadband_correction,
     propose_mode_cuts,
     NoHarmStatus,
     validate_no_harm,
 )
+from spatial_analyzer.filter_digest import peaking_filters_digest
 
 
 def _flat_curve(freq, level_db):
@@ -191,3 +194,87 @@ class TestValidateNoHarm:
         assert with_target.status is NoHarmStatus.UNSAFE
         assert with_target.target_dev_after_db > with_target.target_dev_before_db
         assert "Zielkurve" in with_target.reason
+
+
+class TestNoHarmBinding:
+    """Freigabebindung (Package A): validate_no_harm meldet Umfang und Digest der geprueften Filter."""
+
+    @staticmethod
+    def _setup():
+        freq = np.linspace(90.0, 110.0, 21)
+        l_complex, r_complex = _near_cancellation_setup(freq)
+        return freq, l_complex, r_complex
+
+    def test_safe_run_reports_left_right_scope_and_digest(self):
+        """Regression: ohne Scope/Digest konnte ein SAFE-Ergebnis ohne reale Pruefung wie eine Pruefung wirken."""
+        freq, l_complex, r_complex = self._setup()
+        filt = [PeakingFilter(type="peq", fc=100.0, gain_db=-4.0, q=1.0)]
+        result = validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, filt, filt)
+        assert result.status is NoHarmStatus.SAFE
+        assert result.checked_scope == CHECKED_SCOPE_LEFT_RIGHT
+        assert result.checked_filters_sha256 == peaking_filters_digest(filt, filt)
+
+    def test_unsafe_run_also_reports_scope_and_digest_of_checked_filters(self):
+        """Regression: UNSAFE-Ergebnisse tragen denselben Bezug zu den geprueften Filtern (Status unveraendert)."""
+        freq, l_complex, r_complex = self._setup()
+        boost_r = [PeakingFilter(type="peq", fc=100.0, gain_db=6.0, q=0.5)]
+        result = validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, [], boost_r)
+        assert result.status is NoHarmStatus.UNSAFE
+        assert result.checked_scope == CHECKED_SCOPE_LEFT_RIGHT
+        assert result.checked_filters_sha256 == peaking_filters_digest([], boost_r)
+
+    def test_no_filters_has_scope_none_and_no_digest(self):
+        """Regression: 'keine Filter' darf keinen Pruefumfang vortaeuschen."""
+        freq = np.array([100.0, 200.0, 300.0])
+        l_complex = to_complex(np.full((1, 3), 70.0), np.zeros((1, 3)))
+        result = validate_no_harm(freq, ["p1"], l_complex, l_complex, [], [])
+        assert result.status is NoHarmStatus.SAFE
+        assert result.checked_scope == CHECKED_SCOPE_NONE
+        assert result.checked_filters_sha256 is None
+
+    def test_inconclusive_has_scope_none_and_no_digest(self):
+        """Regression: eine nicht abgeschlossene Pruefung (zu wenige Positionen) ist nicht als geprueft markiert."""
+        freq, l_complex, r_complex = self._setup()
+        l2, r2 = l_complex[:2], r_complex[:2]
+        filt = [PeakingFilter(type="peq", fc=100.0, gain_db=6.0, q=1.0)]
+        result = validate_no_harm(freq, ["p1", "p2"], l2, r2, filt, filt)
+        assert result.status is NoHarmStatus.INCONCLUSIVE
+        assert result.checked_scope == CHECKED_SCOPE_NONE
+        assert result.checked_filters_sha256 is None
+
+    def test_status_and_reason_unchanged_for_unsafe_case(self):
+        """Die Do-No-Harm-Entscheidung bleibt unveraendert (keine Aenderung der Logik durch die Bindung)."""
+        freq, l_complex, r_complex = self._setup()
+        boost_r = [PeakingFilter(type="peq", fc=100.0, gain_db=6.0, q=0.5)]
+        result = validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, [], boost_r)
+        assert result.status is NoHarmStatus.UNSAFE and not result.is_released
+        assert "Streuung" in result.reason
+        assert result.n_positions == 3
+
+    def test_dataclass_positional_construction_still_works(self):
+        """Bestehende positionale Aufrufe von NoHarmResult bleiben gueltig; neue Felder haben Defaults."""
+        from spatial_analyzer.eq_solver import NoHarmResult
+
+        res = NoHarmResult(NoHarmStatus.SAFE, "ok", 5)
+        assert res.checked_scope == CHECKED_SCOPE_NONE and res.checked_filters_sha256 is None
+
+    def test_checked_fields_cannot_be_passed_to_constructor(self):
+        """Regression N1: Pruefnachweis laesst sich nicht per Konstruktor faelschen (init=False)."""
+        from spatial_analyzer.eq_solver import NoHarmResult
+
+        with pytest.raises(TypeError):
+            NoHarmResult(NoHarmStatus.SAFE, "fake", 0, checked_scope="left_right", checked_filters_sha256="a" * 64)
+        with pytest.raises(TypeError):
+            NoHarmResult(NoHarmStatus.SAFE, "fake", 5, checked_scope="left_right")
+
+    def test_result_is_frozen_after_creation(self):
+        """Regression N1: validate_no_harm-Ergebnis laesst sich nicht nachtraeglich umschreiben (frozen)."""
+        import dataclasses
+
+        freq, l_complex, r_complex = self._setup()
+        filt = [PeakingFilter(type="peq", fc=100.0, gain_db=-4.0, q=1.0)]
+        result = validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, filt, filt)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.checked_scope = CHECKED_SCOPE_NONE
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.status = NoHarmStatus.UNSAFE

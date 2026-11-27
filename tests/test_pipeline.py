@@ -93,7 +93,10 @@ class TestRunPipeline:
 
         report = run_pipeline(input_path, tmp_path / "out")
         assert any("Impulsantwort" in n for n in report.notes)
+        ir_note = next(n for n in report.notes if "Impulsantwort" in n)
+        assert "L" in ir_note and "R" in ir_note
         assert all(c.decay_confirmed is None for c in report.mode_confirmations)
+        assert all(c.decay_confirmed is None for c in report.mode_confirmations_r)
         # Ohne Abkling-Bestaetigung duerfen keine Mode-Cuts entstehen.
         mode_cuts = [p for p in report.eq_proposals_l if "Mode" in p.reason or "mode" in p.reason.lower()]
         assert mode_cuts == []
@@ -468,9 +471,46 @@ class TestRunPipelineReleaseMarking:
 
     def test_two_positions_real_run_is_never_released_with_filters(self, tmp_path):
         positions = [_synthetic_position("sofa_mitte", with_ir=True), _synthetic_position("wander_0")]
+        # Beide Kanaele benoetigen ihre eigene Referenz-IR, damit der Test
+        # die kanalgetrennte Filtererzeugung fuer L und R prueft.
+        positions[0]["r"]["impulse_response"] = _synthetic_ir_with_slow_decay()
         _write_input(tmp_path / "in.json", positions)
         report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
         assert report.eq_proposals_l and report.eq_proposals_r  # Filter werden vorgeschlagen
         assert report.do_no_harm.status.value == "INCONCLUSIVE"
         assert (tmp_path / "out" / "NICHT_FREIGEGEBEN.txt").exists()
         assert any("INCONCLUSIVE" in n for n in report.notes)
+
+
+def test_pipeline_report_exports_channel_specific_mode_confirmation_keys(tmp_path):
+    positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+    positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+    _write_input(tmp_path / "in.json", positions)
+    run_pipeline(tmp_path / "in.json", tmp_path / "out")
+    data = json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
+    assumptions = data["modellannahmen"]
+    assert "mode_confirmations" in assumptions
+    assert "mode_confirmations_l" in assumptions
+    assert "mode_confirmations_r" in assumptions
+
+
+def test_pipeline_uses_each_channels_own_reference_impulse_response(tmp_path, monkeypatch):
+    from spatial_analyzer import pipeline
+
+    positions = [_synthetic_position("sofa_mitte", with_ir=True)]
+    positions += [_synthetic_position(f"wander_{i}") for i in range(3)]
+    positions[0]["l"]["impulse_response"] = {"samples": [0.0, 1.0, 0.0], "sample_interval_s": 1e-4}
+    positions[0]["r"]["impulse_response"] = {"samples": [0.0, 2.0, 0.0], "sample_interval_s": 1e-4}
+    seen = []
+
+    def fake_confirm(freq, averaged, positions_spl, room, reference_ir):
+        seen.append(reference_ir)
+        return []
+
+    monkeypatch.setattr(pipeline, "_confirm_mode_candidates", fake_confirm)
+    _write_input(tmp_path / "in.json", positions)
+    pipeline.run_pipeline(tmp_path / "in.json", tmp_path / "out")
+
+    assert len(seen) == 2
+    assert seen[0]["samples"] == [0.0, 1.0, 0.0]
+    assert seen[1]["samples"] == [0.0, 2.0, 0.0]

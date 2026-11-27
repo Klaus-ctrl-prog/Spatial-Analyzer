@@ -173,7 +173,7 @@ def build_rew_generic_eq_text(filters: list[PeakingFilter], preamp_db: float = 0
 def export_rew_generic_eq_txt(
     path: str | Path,
     filters: list[PeakingFilter],
-    preamp_db: float = 0.0,
+    preamp_db: float | None = None,
     header_comment: str | None = None,
 ) -> str:
     """`header_comment` (z. B. "NICHT FREIGEGEBEN / UNSAFE ...") wird als
@@ -183,6 +183,8 @@ def export_rew_generic_eq_txt(
     byte-identisch zum bisherigen Format); scheitert ein Import wegen der
     Kommentarzeile, ist das fuer ein nicht freigegebenes Artefakt
     ausdruecklich akzeptabel."""
+    if preamp_db is None:
+        preamp_db = auto_preamp_db(filters, [])
     text = build_rew_generic_eq_text(filters, preamp_db=preamp_db)
     if header_comment:
         header = "".join(f"# {line}\n" for line in header_comment.splitlines())

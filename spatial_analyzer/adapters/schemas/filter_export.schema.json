@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "filter_export.json (Spatial-Analyzer, contract_version 1.1)",
+  "description": "Neutraler Austauschvertrag zwischen Kern und Geraete-Adaptern (Version 1.1; Legacy 1.0 siehe filter_export_1_0.schema.json, nur lesend). Kanonische Pruefung: spatial_analyzer.filter_export.validate_filter_export(). Die Zuordnung checked_scope/checked_filters_sha256/status/Geraet wird hier per if/then geprueft; die Digest-Gleichheit (sha == Digest der exportierten filters) und die n_positions-Regel werden nur in Python geprueft.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "run_id", "target_device", "approval", "intentional_flat", "filters", "crossovers", "provenance"],
+  "allOf": [
+    {
+      "if": {"required": ["approval"], "properties": {"approval": {"required": ["checked_scope"], "properties": {"checked_scope": {"const": "none"}}}}},
+      "then": {"properties": {"approval": {"properties": {"checked_filters_sha256": {"type": "null"}}}}}
+    },
+    {
+      "if": {"required": ["approval"], "properties": {"approval": {"required": ["checked_scope"], "properties": {"checked_scope": {"const": "left_right"}}}}},
+      "then": {"properties": {"approval": {"properties": {"checked_filters_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}}
+    },
+    {
+      "if": {"required": ["approval"], "properties": {"approval": {"required": ["status"], "properties": {"status": {"const": "RELEASED"}}}}},
+      "then": {
+        "required": ["target_device"],
+        "properties": {
+          "target_device": {"const": "kef_ls50_wireless"},
+          "approval": {"properties": {"checked_scope": {"const": "left_right"}, "do_no_harm": {"const": "SAFE"}}}
+        }
+      }
+    }
+  ],
+  "properties": {
+    "contract_version": {"const": "1.1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "target_device": {"enum": ["saxx_ds120", "mosconi_pico_8_10", "kef_ls50_wireless"]},
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "do_no_harm", "hardware_validated", "checked_scope", "checked_filters_sha256"],
+      "properties": {
+        "status": {"enum": ["RELEASED", "BLOCKED"]},
+        "do_no_harm": {"enum": ["SAFE", "UNSAFE", "INCONCLUSIVE"]},
+        "hardware_validated": {"const": false},
+        "checked_scope": {"enum": ["left_right", "none"], "description": "Umfang der Do-No-Harm-Pruefung: left_right nur fuer KEF (validate_no_harm ueber filters_l/filters_r), sonst none."},
+        "checked_filters_sha256": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}], "description": "Digest (filter_digest.filters_digest) der geprueften Filter; null bei checked_scope none. RELEASED nur, wenn gleich dem Digest der exportierten filters (nicht im Schema ausdrueckbar)."}
+      }
+    },
+    "intentional_flat": {"type": "boolean"},
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eq_proposals_l", "eq_proposals_r", "subwoofer"],
+      "properties": {
+        "eq_proposals_l": {"type": "array", "items": {"$ref": "#/$defs/filter"}},
+        "eq_proposals_r": {"type": "array", "items": {"$ref": "#/$defs/filter"}},
+        "subwoofer": {"type": "array", "items": {"$ref": "#/$defs/filter"}}
+      }
+    },
+    "crossovers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hpf", "lpf"],
+      "properties": {
+        "hpf": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/crossover"}]},
+        "lpf": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/crossover"}]},
+        "phase_deg": {"type": "integer"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_set_id", "source_profile_sha256"],
+      "properties": {
+        "measurement_set_id": {"type": "string", "minLength": 1},
+        "source_profile_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "$defs": {
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "fc_hz", "gain_db", "q"],
+      "properties": {
+        "type": {"enum": ["peq", "lowshelf", "highshelf"]},
+        "fc_hz": {"type": "number", "exclusiveMinimum": 0},
+        "gain_db": {"type": "number"},
+        "q": {"type": "number", "exclusiveMinimum": 0},
+        "shelf_slope_db": {"enum": [6, 12]},
+        "reason": {"type": "string"}
+      }
+    },
+    "crossover": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frequency_hz", "type", "enabled"],
+      "properties": {
+        "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
+        "type": {"type": "string"},
+        "enabled": {"type": "boolean"}
+      }
+    }
+  }
+}

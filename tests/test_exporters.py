@@ -99,3 +99,13 @@ class TestExportRewGenericEqTxt:
         text = export_rew_generic_eq_txt(path, filters, preamp_db=0.0)
         assert path.exists()
         assert path.read_text(encoding="utf-8") == text
+
+
+def test_export_rew_generic_eq_txt_auto_preamp_and_explicit_zero(tmp_path):
+    from spatial_analyzer.exporters import auto_preamp_db
+
+    filters = [PeakingFilter(type="peq", fc=60.0, gain_db=6.0, q=2.0)]
+    automatic = export_rew_generic_eq_txt(tmp_path / "auto.txt", filters)
+    assert automatic.startswith(f"Preamp: {auto_preamp_db(filters, []):.2f} dB")
+    explicit_zero = export_rew_generic_eq_txt(tmp_path / "zero.txt", filters, preamp_db=0.0)
+    assert explicit_zero.startswith("Preamp: 0.00 dB")

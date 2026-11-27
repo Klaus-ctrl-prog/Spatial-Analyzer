@@ -76,6 +76,7 @@ class CompareReport:
     eq_proposal_count_before_r: int = 0
     eq_proposal_count_after_r: int = 0
     notes: list[str] = field(default_factory=list)
+    align_band_hz: tuple[float, float] | None = DEFAULT_ALIGN_BAND_HZ
 
     def _delta_summary(self, delta: CurveDelta | None) -> dict[str, Any] | None:
         if delta is None:
@@ -100,6 +101,7 @@ class CompareReport:
                 "spread_db_mean_l": {"vorher": self.spread_before_l_db, "nachher": self.spread_after_l_db},
                 "spread_db_mean_r": {"vorher": self.spread_before_r_db, "nachher": self.spread_after_r_db},
             },
+            "align_band_hz": list(self.align_band_hz) if self.align_band_hz is not None else None,
             "delta_kurven": {
                 "l": self._delta_summary(self.delta_l),
                 "r": self._delta_summary(self.delta_r),
@@ -155,7 +157,8 @@ def _load_report(output_dir: Path) -> dict[str, Any]:
 
 
 def _compute_curve_delta(
-    before_table: dict[str, np.ndarray], after_table: dict[str, np.ndarray]
+    before_table: dict[str, np.ndarray], after_table: dict[str, np.ndarray],
+    align_band_hz: tuple[float, float] | None = DEFAULT_ALIGN_BAND_HZ,
 ) -> CurveDelta:
     before_freq = before_table["freq_hz"]
     after_freq = after_table["freq_hz"]
@@ -166,14 +169,17 @@ def _compute_curve_delta(
     before_on_grid = interpolate_to_grid(before_freq, before_table["averaged_spl_db"], target_grid)
     after_on_grid = interpolate_to_grid(after_freq, after_table["averaged_spl_db"], target_grid)
 
-    band_mask = (target_grid >= DEFAULT_ALIGN_BAND_HZ[0]) & (target_grid <= DEFAULT_ALIGN_BAND_HZ[1])
-    if not band_mask.any():
-        raise ValueError(
-            f"Referenzband {DEFAULT_ALIGN_BAND_HZ} Hz liegt ausserhalb des gemeinsamen Frequenzbereichs"
-        )
-    ref_before = float(energetic_mean_db(before_on_grid[band_mask]))
-    ref_after = float(energetic_mean_db(after_on_grid[band_mask]))
-    shift = ref_before - ref_after
+    if align_band_hz is None:
+        shift = 0.0
+    else:
+        if len(align_band_hz) != 2 or align_band_hz[0] >= align_band_hz[1]:
+            raise ValueError(f"Ungueltiges Referenzband {align_band_hz!r} Hz")
+        band_mask = (target_grid >= align_band_hz[0]) & (target_grid <= align_band_hz[1])
+        if not band_mask.any():
+            raise ValueError(f"Referenzband {align_band_hz} Hz liegt ausserhalb des gemeinsamen Frequenzbereichs")
+        ref_before = float(energetic_mean_db(before_on_grid[band_mask]))
+        ref_after = float(energetic_mean_db(after_on_grid[band_mask]))
+        shift = ref_before - ref_after
 
     delta_db = (after_on_grid + shift) - before_on_grid
     return CurveDelta(freq_hz=target_grid, delta_db=delta_db, alignment_shift_db=shift)
@@ -231,7 +237,12 @@ def _match_mode_comparisons(
     return comparisons
 
 
-def run_compare(before_dir: str | Path, after_dir: str | Path, output_dir: str | Path) -> CompareReport:
+def run_compare(
+    before_dir: str | Path,
+    after_dir: str | Path,
+    output_dir: str | Path,
+    align_band_hz: tuple[float, float] | None = DEFAULT_ALIGN_BAND_HZ,
+) -> CompareReport:
     before_dir = Path(before_dir)
     after_dir = Path(after_dir)
     output_dir = Path(output_dir)
@@ -254,7 +265,9 @@ def run_compare(before_dir: str | Path, after_dir: str | Path, output_dir: str |
             continue
         try:
             deltas[channel] = _compute_curve_delta(
-                _read_frequency_table(before_csv), _read_frequency_table(after_csv)
+                _read_frequency_table(before_csv),
+                _read_frequency_table(after_csv),
+                align_band_hz=align_band_hz,
             )
         except ValueError as exc:
             notes.append(f"Kanal '{channel}': Delta-Kurve uebersprungen ({exc}).")
@@ -309,6 +322,7 @@ def run_compare(before_dir: str | Path, after_dir: str | Path, output_dir: str |
         eq_proposal_count_before_r=len(before_eq_r),
         eq_proposal_count_after_r=len(after_eq_r),
         notes=notes,
+        align_band_hz=align_band_hz,
     )
 
     report.write_json(output_dir / "compare_report.json")
@@ -376,10 +390,12 @@ th, td {{ border: 1px solid #ccc; padding: 4px 8px; text-align: left; }}
 {spread_row("R", report.spread_before_r_db, report.spread_after_r_db)}
 </table>
 
-<h2>Delta-Kurven (angeglichen auf Referenzpegel 400 Hz - 2 kHz)</h2>
-<div class="model-banner">Die Nachher-Kurve wurde auf den Referenzpegel der
-Vorher-Kurve verschoben (analog REW "Align SPL") - Unterschiede im
-Referenzband selbst sind dadurch per Definition nahe 0 dB.</div>
+<h2>Delta-Kurven (Referenzband: {e(str(report.align_band_hz)) if report.align_band_hz is not None else "keine Angleichung (0 dB Verschiebung)"})</h2>
+<div class="model-banner">{(
+    f'Die Nachher-Kurve wurde im Band {report.align_band_hz[0]:g}-{report.align_band_hz[1]:g} Hz auf den Referenzpegel der Vorher-Kurve verschoben (analog REW "Align SPL").'
+    if report.align_band_hz is not None
+    else 'Keine Pegelangleichung: Die Delta-Kurve zeigt die unveraenderte Pegeldifferenz.'
+)}</div>
 {delta_block("L", report.delta_l)}
 {delta_block("R", report.delta_r)}
 

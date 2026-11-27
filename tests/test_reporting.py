@@ -134,3 +134,23 @@ class TestWriteFrequencyTableCsv:
         freq = np.array([20.0, 40.0, 60.0])
         with pytest.raises(ValueError):
             write_frequency_table_csv(path, freq, {"spl_db": np.array([60.0, 61.0])})
+
+
+def test_channel_specific_mode_confirmations_keep_legacy_field_and_html(tmp_path):
+    from spatial_analyzer import reporting
+    from spatial_analyzer.eq_solver import ModeConfirmation
+
+    report = _sample_report()
+    report.mode_confirmations_l = [
+        ModeConfirmation(freq_hz=48.0, classification="mode_candidate", decay_confirmed=True, q_factor=4.0)
+    ]
+    report.mode_confirmations_r = [
+        ModeConfirmation(freq_hz=63.0, classification="comb_filter_candidate", decay_confirmed=False, q_factor=None)
+    ]
+    assumptions = report.to_dict()["modellannahmen"]
+    assert assumptions["mode_confirmations"][0]["freq_hz"] == 60.0
+    assert assumptions["mode_confirmations_l"][0]["freq_hz"] == 48.0
+    assert assumptions["mode_confirmations_r"][0]["freq_hz"] == 63.0
+    html = reporting.render_html(report)
+    assert "Modenkandidaten L" in html and "Modenkandidaten R" in html
+    assert "48.0 Hz" in html and "63.0 Hz" in html
