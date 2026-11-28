@@ -72,6 +72,14 @@ class _FakeClient:
     def get_impulse_response_raw(self, uuid):
         return self._impulse_responses[uuid]
 
+    def get_impulse_response(self, uuid):
+        # t=0 weit hinter den kurzen Test-IRs, damit die 10-%-Regel greift.
+        return {
+            "samples": np.asarray(self._impulse_responses[uuid], dtype=np.float64),
+            "start_time_s": -1.0,
+            "sample_interval_s": 1e-3,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Profile
@@ -262,6 +270,20 @@ class TestCheckPretriggerNoise:
 
 
 class TestCheckAbaDrift:
+
+    def test_pretrigger_end_caps_noise_segment_before_peak(self):
+        # Peak liegt innerhalb der ersten 10 %: ohne Begrenzung landet er im
+        # Rauschsegment (SNR ~0 dB), mit pretrigger_end davor nicht.
+        rng = np.random.default_rng(0)
+        samples = rng.normal(0.0, 1e-4, 1000)
+        samples[50] = 1.0
+        assert check_pretrigger_noise(samples, QcThresholds()).severity == "warning"
+        assert check_pretrigger_noise(samples, QcThresholds(), pretrigger_end=40).severity == "ok"
+
+    def test_pretrigger_end_negative_gives_warning(self):
+        samples = np.concatenate([np.full(100, 1e-6), [1.0]])
+        finding = check_pretrigger_noise(samples, QcThresholds(), pretrigger_end=-5)
+        assert finding.severity == "warning"
     def test_identical_curves_are_ok(self):
         freqs = np.linspace(20, 200, 50)
         spl = np.full(50, 70.0)

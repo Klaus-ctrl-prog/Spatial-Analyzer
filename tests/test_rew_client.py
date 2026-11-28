@@ -206,6 +206,31 @@ class TestReadOnlyRewClientWithMockedTransport:
         with pytest.raises(RewApiError):
             decode_impulse_response({"startTime": 0.0, "sampleInterval": 1e-5})
 
+    def test_invalid_json_raises_rew_api_error(self, monkeypatch):
+        client = ReadOnlyRewClient()
+
+        class _BadJsonResponse:
+            status_code = 200
+            content = b"kein json"
+
+            def json(self):
+                raise ValueError("kein JSON")
+
+        class _Session:
+            def request(self, method, url, timeout):
+                return _BadJsonResponse()
+
+        monkeypatch.setattr(client, "_session", _Session())
+        with pytest.raises(RewApiError):
+            client.get_impulse_response("some-uuid")
+
+    @pytest.mark.parametrize("rate", [True, float("nan"), float("inf"), 0.0, "44100"])
+    def test_decode_impulse_response_rejects_invalid_sample_rate(self, rate):
+        with pytest.raises(RewApiError):
+            decode_impulse_response(
+                {"startTime": 0.0, "sampleInterval": 1e-5, "sampleRate": rate, "data": _b64(1.0)}
+            )
+
     def test_non_200_status_raises_rew_api_error(self, monkeypatch):
         import requests
 

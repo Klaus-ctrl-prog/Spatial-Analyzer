@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import binascii
 import math
-import struct
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,7 +61,12 @@ class ReadOnlyRewClient:
             raise RewApiError(f"GET {url} fehlgeschlagen: {exc}") from exc
         if response.status_code != 200:
             raise RewApiError(f"GET {url} -> HTTP {response.status_code}")
-        return response.content if raw else response.json()
+        if raw:
+            return response.content
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RewApiError(f"GET {url} lieferte kein gueltiges JSON") from exc
 
     def list_measurements(self) -> list[RewMeasurementMeta]:
         data = self._request("/measurements")
@@ -210,12 +214,14 @@ def decode_impulse_response(data: Any) -> dict[str, Any]:
     interval = _require_number(data, "sampleInterval")
     if interval <= 0:
         raise RewApiError("sampleInterval muss positiv sein")
-    sample_rate = data.get("sampleRate")
+    sample_rate = _require_number(data, "sampleRate") if data.get("sampleRate") is not None else None
+    if sample_rate is not None and sample_rate <= 0:
+        raise RewApiError("sampleRate muss positiv sein")
     return {
         "samples": samples,
         "sample_interval_s": interval,
         "start_time_s": _require_number(data, "startTime"),
-        "sample_rate_hz": float(sample_rate) if isinstance(sample_rate, (int, float)) else None,
+        "sample_rate_hz": sample_rate,
         "timing_reference": data.get("timingReference"),
         "unit": data.get("unit"),
     }
@@ -231,6 +237,4 @@ def decode_big_endian_float32(raw_bytes: bytes) -> np.ndarray:
             f"Byte-Stream-Laenge {len(raw_bytes)} ist kein Vielfaches von 4 "
             "(kein gueltiger Float32-Stream)"
         )
-    count = len(raw_bytes) // 4
-    values = struct.unpack(f">{count}f", raw_bytes)
-    return np.asarray(values, dtype=np.float64)
+    return np.frombuffer(raw_bytes, dtype=">f4").astype(np.float64)
