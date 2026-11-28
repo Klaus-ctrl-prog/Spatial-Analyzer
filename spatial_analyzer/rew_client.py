@@ -80,6 +80,9 @@ class ReadOnlyRewClient:
                 RewMeasurementMeta(
                     uuid=str(uuid),
                     title=item.get("title", ""),
+                    # Achtung: REW V5.20.13 liefert `hasImpulseResponse` in
+                    # /measurements nicht (28.11.2026 belegt) - dort ist
+                    # is_sweep daher immer False und nicht aussagekraeftig.
                     is_sweep=bool(item.get("hasImpulseResponse", False)),
                     raw=item,
                 )
