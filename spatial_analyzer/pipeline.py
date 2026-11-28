@@ -679,8 +679,11 @@ def _build_filter_exports(
     gemeldet (fail-closed: dann wird keine Exportdatei geschrieben und eine
     gleichnamige Datei aus einem frueheren Lauf entfernt, siehe run_pipeline).
     """
-    measurement_set_id = hashlib.sha256(input_path.read_bytes()).hexdigest()
-    run_id = f"run-{measurement_set_id[:12]}"
+    input_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    run_id = f"run-{input_sha256[:12]}"
+    # F2: measurement_set_id = Digest der tatsaechlich geprueften Messdaten (bindet
+    # die KEF-Freigabe an diese Messung); ohne vollstaendige Pruefung Datei-Hash.
+    measurement_set_id = getattr(do_no_harm, "checked_data_sha256", None) or input_sha256
     exports: dict[str, dict[str, Any]] = {}
     try:
         exports["filter_export_kef.json"] = build_filter_export(

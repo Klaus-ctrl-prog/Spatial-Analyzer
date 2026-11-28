@@ -31,13 +31,57 @@ def _no_harm(**kw):
     phase = np.deg2rad(180.0 + np.array([0.0, -5.0, 5.0]))[:, None]
     l_c = np.ones((3, freq.size), dtype=np.complex128)
     r_c = 0.5 * np.exp(1j * phase) * np.ones((3, freq.size))
+    kw.setdefault("target_db", np.full(freq.size, -6.0))
     return validate_no_harm(freq, ["p1", "p2", "p3"], l_c, r_c, FILTERS, FILTERS, **kw)
 
 
-def _kef(no_harm, **kw):
+def _kef(no_harm, measurement_set_id=None, **kw):
     sat = [EqProposal(f, "mode") for f in FILTERS]
+    msid = measurement_set_id or no_harm.checked_data_sha256 or "m"
     return build_filter_export(run_id="r", target_device="kef_ls50_wireless", no_harm=no_harm,
-                               measurement_set_id="m", eq_proposals_l=sat, eq_proposals_r=sat, **kw)
+                               measurement_set_id=msid, eq_proposals_l=sat, eq_proposals_r=sat, **kw)
+
+
+# --- F2 und Zielkurve (Nachbesserung zu PR #33) ------------------------------------
+def test_proof_cannot_be_reused_for_other_measurement():
+    nh = _no_harm()
+    assert _kef(nh)["approval"]["status"] == "RELEASED"
+    assert _kef(nh, measurement_set_id="OTHER")["approval"]["status"] == "BLOCKED"
+
+
+def test_check_without_target_curve_never_releases():
+    nh = _no_harm(target_db=None)
+    assert nh.checked_target_curve is False
+    assert _kef(nh)["approval"]["status"] == "BLOCKED"
+
+
+def test_data_digest_is_deterministic_and_sensitive():
+    from spatial_analyzer.eq_solver import measurement_data_digest as d
+    f = np.linspace(90.0, 110.0, 5)
+    l = np.ones((3, 5), dtype=np.complex128)
+    base = d(f, ["a", "b", "c"], l, l, np.zeros(5))
+    assert base == d(f.copy(), ["a", "b", "c"], l.copy(), l.copy(), -np.zeros(5))  # -0.0 == 0.0
+    assert base != d(f, ["a", "c", "b"], l, l, np.zeros(5))  # Positionsreihenfolge
+    l2 = l.copy(); l2[1, 2] += 1e-9
+    assert base != d(f, ["a", "b", "c"], l2, l, np.zeros(5))  # Messwert
+    assert base != d(f, ["a", "b", "c"], l, l, np.full(5, 0.1))  # Zielkurve
+    assert base != d(f, ["a", "b", "c"], l, l, None)
+    # Review #34: Trennzeichen in IDs duerfen nicht kollidieren
+    assert d(f, ["a\x1fb", "c"], l[:2], l[:2], None) != d(f, ["a", "b\x1fc"], l[:2], l[:2], None)
+
+
+def test_pipeline_kef_export_binds_measurement(tmp_path):
+    """Review #34: muss tatsaechlich Filter und eine vollstaendige Pruefung erzeugen."""
+    from tests.test_pipeline import _write_synthetic_input
+    _write_synthetic_input(tmp_path / "in.json")  # konsistente 60-Hz-Mode -> Cut-Vorschlag
+    report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+    assert report.eq_proposals_l or report.eq_proposals_r
+    digest = report.do_no_harm.checked_data_sha256
+    assert isinstance(digest, str) and len(digest) == 64
+    kef = json.loads((tmp_path / "out" / "filter_export_kef.json").read_text("utf-8"))
+    assert kef["provenance"]["measurement_set_id"] == digest
+    expected = "RELEASED" if report.do_no_harm.status.value == "SAFE" else "BLOCKED"
+    assert kef["approval"]["status"] == expected
 
 
 def test_default_check_is_released():
