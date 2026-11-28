@@ -13,6 +13,9 @@ ueber einen veraenderlichen numerischen Index.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import math
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -101,26 +104,39 @@ class ReadOnlyRewClient:
         return self._request(f"/measurements/{uuid}")
 
     def get_frequency_response(self, uuid: str) -> dict[str, Any]:
-        """Frequenzgang (SPL/Phase) einer Messung per UUID.
+        """Ungeglaetteter Frequenzgang einer Messung per UUID, dekodiert.
 
-        Hinweis (verifiziert, siehe Zwischenstand-Doku Abschnitt 2): 96 PPO
-        impliziert in REW zwingend mindestens 1/48-Oktav-Glaettung. Dieser
-        Client liefert nur die Rohantwort der API weiter - die Einordnung
-        als "geglaettet" erfolgt in models.Measurement.__post_init__ anhand
-        des uebergebenen ppo-Werts, nicht hier.
+        Format am echten REW V5.20.13 belegt (28.11.2026): JSON mit `unit`,
+        `smoothing`, `startFreq` und entweder `ppo` (log. Raster) oder
+        `freqStep` (lin. Raster); `magnitude`/`phase` sind Base64-kodierte
+        Big-Endian-Float32. Ohne Query-Parameter liefert REW die in der GUI
+        eingestellte Glaettung (z. B. `Psy`) - daher immer `smoothing=None`.
+
+        Rueckgabe: `freq_hz`, `spl_db`, `phase_deg` (oder None), `smoothing`,
+        `unit`.
         """
         self._require_uuid(uuid)
-        return self._request(f"/measurements/{uuid}/frequency-response")
+        data = self._request(f"/measurements/{uuid}/frequency-response?smoothing=None")
+        return decode_frequency_response(data)
+
+    def get_impulse_response(self, uuid: str) -> dict[str, Any]:
+        """Impulsantwort einer Messung per UUID, dekodiert.
+
+        Format am echten REW V5.20.13 belegt (28.11.2026): JSON mit `unit`,
+        `startTime`, `sampleInterval`, `sampleRate`, `timingReference` und
+        Base64-kodierten Big-Endian-Float32-Samples in `data` (keine rohen
+        Bytes).
+
+        Rueckgabe: `samples`, `sample_interval_s`, `start_time_s`,
+        `sample_rate_hz`, `timing_reference`, `unit`.
+        """
+        self._require_uuid(uuid)
+        data = self._request(f"/measurements/{uuid}/impulse-response")
+        return decode_impulse_response(data)
 
     def get_impulse_response_raw(self, uuid: str) -> np.ndarray:
-        """Rohe Impulsantwort als Big-Endian-Float32-Array.
-
-        Der IR-Pfad ist laut Zwischenstand-Doku (Abschnitt 2) der zu
-        bevorzugende Weg fuer echte ungeglaettete Rohdaten/Phase.
-        """
-        self._require_uuid(uuid)
-        raw_bytes = self._request(f"/measurements/{uuid}/impulse-response", raw=True)
-        return decode_big_endian_float32(raw_bytes)
+        """Nur die Samples der Impulsantwort (siehe `get_impulse_response`)."""
+        return self.get_impulse_response(uuid)["samples"]
 
     @staticmethod
     def _require_uuid(uuid: str) -> None:
@@ -129,6 +145,80 @@ class ReadOnlyRewClient:
                 "Messungen muessen ueber eine nichtleere UUID adressiert werden, "
                 "niemals ueber einen numerischen Index."
             )
+
+
+def decode_base64_float32(text: Any, field_name: str) -> np.ndarray:
+    """Dekodiert ein Base64-Feld der REW-API zu Big-Endian-Float32-Werten."""
+    if not isinstance(text, str) or not text:
+        raise RewApiError(f"REW-Feld {field_name!r} fehlt oder ist leer")
+    try:
+        raw_bytes = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RewApiError(f"REW-Feld {field_name!r} ist kein gueltiges Base64") from exc
+    return decode_big_endian_float32(raw_bytes)
+
+
+def _require_number(data: dict[str, Any], key: str) -> float:
+    value = data.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise RewApiError(f"REW-Feld {key!r} fehlt oder ist keine endliche Zahl")
+    return float(value)
+
+
+def decode_frequency_response(data: Any) -> dict[str, Any]:
+    """Dekodiert die `/frequency-response`-Antwort (Format siehe Client)."""
+    if not isinstance(data, dict):
+        raise RewApiError("Frequenzgang-Antwort ist kein JSON-Objekt")
+    spl = decode_base64_float32(data.get("magnitude"), "magnitude")
+    phase = None
+    if data.get("phase") is not None:
+        phase = decode_base64_float32(data.get("phase"), "phase")
+        if len(phase) != len(spl):
+            raise RewApiError(
+                f"phase ({len(phase)}) und magnitude ({len(spl)}) sind unterschiedlich lang"
+            )
+    start = _require_number(data, "startFreq")
+    if start <= 0:
+        raise RewApiError("startFreq muss positiv sein")
+    index = np.arange(len(spl), dtype=np.float64)
+    if data.get("ppo") is not None:
+        ppo = _require_number(data, "ppo")
+        if ppo <= 0:
+            raise RewApiError("ppo muss positiv sein")
+        freq = start * np.power(2.0, index / ppo)
+    elif data.get("freqStep") is not None:
+        step = _require_number(data, "freqStep")
+        if step <= 0:
+            raise RewApiError("freqStep muss positiv sein")
+        freq = start + index * step
+    else:
+        raise RewApiError("Frequenzgang-Antwort ohne ppo und ohne freqStep")
+    return {
+        "freq_hz": freq,
+        "spl_db": spl,
+        "phase_deg": phase,
+        "smoothing": data.get("smoothing"),
+        "unit": data.get("unit"),
+    }
+
+
+def decode_impulse_response(data: Any) -> dict[str, Any]:
+    """Dekodiert die `/impulse-response`-Antwort (Format siehe Client)."""
+    if not isinstance(data, dict):
+        raise RewApiError("Impulsantwort-Antwort ist kein JSON-Objekt")
+    samples = decode_base64_float32(data.get("data"), "data")
+    interval = _require_number(data, "sampleInterval")
+    if interval <= 0:
+        raise RewApiError("sampleInterval muss positiv sein")
+    sample_rate = data.get("sampleRate")
+    return {
+        "samples": samples,
+        "sample_interval_s": interval,
+        "start_time_s": _require_number(data, "startTime"),
+        "sample_rate_hz": float(sample_rate) if isinstance(sample_rate, (int, float)) else None,
+        "timing_reference": data.get("timingReference"),
+        "unit": data.get("unit"),
+    }
 
 
 def decode_big_endian_float32(raw_bytes: bytes) -> np.ndarray:

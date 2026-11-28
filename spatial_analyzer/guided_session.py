@@ -1214,15 +1214,26 @@ def _detect_and_qc(
 
     try:
         freq_response = client.get_frequency_response(measurement.uuid)
-        qc_data["spl_db"] = np.asarray(freq_response.get("spl", []), dtype=np.float64)
-        qc_data["freq_hz"] = np.asarray(freq_response.get("freq", []), dtype=np.float64)
+        qc_data["spl_db"] = np.asarray(freq_response["spl_db"], dtype=np.float64)
+        qc_data["freq_hz"] = np.asarray(freq_response["freq_hz"], dtype=np.float64)
     except RewApiError as exc:
         print_fn(f"Hinweis: Frequenzgang nicht abrufbar ({exc}) - SPL-QC ausgelassen.")
 
     try:
         ir = client.get_impulse_response_raw(measurement.uuid)
         qc_data["ir_samples"] = ir
-        qc_findings.append(check_clipping(ir, qc_thresholds))
+        # Am echten REW V5.20.13 belegt (28.11.2026): die API liefert die IR
+        # auf Peak 1.0 normiert (unit "percent"). `check_clipping` wuerde
+        # dann immer 0 dBFS melden - Clipping ist aus der IR nicht pruefbar
+        # (raum_akustik.md Abschnitt 15.6, offener Punkt 21).
+        qc_findings.append(
+            QcFinding(
+                "warning",
+                "clipping",
+                "aus der REW-Impulsantwort nicht pruefbar (REW normiert auf Peak) - "
+                "Eingangspegel in REW selbst kontrollieren",
+            )
+        )
         qc_findings.append(check_pretrigger_noise(ir, qc_thresholds))
     except RewApiError as exc:
         print_fn(f"Hinweis: Impulsantwort nicht abrufbar ({exc}) - IR-QC ausgelassen.")

@@ -516,7 +516,7 @@ class TestRunGuidedSessionWithFakeClient:
         ir = np.concatenate([np.full(10, 1e-6), [0.5], np.zeros(20)])
         client = _FakeClient(
             measurements=[],
-            freq_responses={"u1": {"freq": freqs.tolist(), "spl": np.full(10, 70.0).tolist()}},
+            freq_responses={"u1": {"freq_hz": freqs.tolist(), "spl_db": np.full(10, 70.0).tolist()}},
             impulse_responses={"u1": ir},
         )
         # Baseline (vor dem ersten Sweep) ist leer, erst nach der
@@ -551,7 +551,13 @@ class TestRunGuidedSessionWithFakeClient:
         assert entry.measurement_name == "P01_L"
         assert entry.uuid == "u1"
         assert entry.detection_status == "ok"
-        assert any(f["check"] == "clipping" for f in entry.qc_findings)
+        clipping = [f for f in entry.qc_findings if f["check"] == "clipping"]
+        assert len(clipping) == 1
+        # REW normiert die IR auf Peak 1.0 -> Clipping ist nicht pruefbar
+        # und darf nicht als "ok" erscheinen.
+        assert clipping[0]["severity"] == "warning"
+        assert "nicht pruefbar" in clipping[0]["message"]
+        assert any(f["check"] == "noise_floor" for f in entry.qc_findings)
         assert (tmp_path / "notes" / "P01_L.txt").exists()
 
     def test_multiple_new_measurements_detected_warns_and_skips_qc(self, tmp_path):
@@ -597,8 +603,8 @@ class TestRunGuidedSessionWithFakeClient:
         client = _FakeClient(
             measurements=[],
             freq_responses={
-                "a1": {"freq": freqs.tolist(), "spl": a1_spl.tolist()},
-                "a2": {"freq": freqs.tolist(), "spl": a2_spl.tolist()},
+                "a1": {"freq_hz": freqs.tolist(), "spl_db": a1_spl.tolist()},
+                "a2": {"freq_hz": freqs.tolist(), "spl_db": a2_spl.tolist()},
             },
             impulse_responses={"a1": quiet_ir, "a2": quiet_ir},
         )
@@ -651,7 +657,7 @@ def _scripted_client(responses, uuids=("u1", "u2", "u3", "u4")):
     ir = np.concatenate([np.full(10, 1e-6), [0.5], np.zeros(20)])
     client = _FakeClient(
         measurements=[],
-        freq_responses={u: {"freq": freqs.tolist(), "spl": np.full(10, 70.0).tolist()} for u in uuids},
+        freq_responses={u: {"freq_hz": freqs.tolist(), "spl_db": np.full(10, 70.0).tolist()} for u in uuids},
         impulse_responses={u: ir for u in uuids},
     )
     state = {"n": 0}
