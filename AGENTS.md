@@ -1,12 +1,12 @@
 # Projekt-Verfassung & KI-Arbeitsteilung (`AGENTS.md`)
 
 ## 0. Aktueller Stand (nur hier pflegen)
-- **Arbeits-Branch:** `fix/package-a-measurement-qc-20261124`
+- **Arbeits-Branch:** `main`. Der Branch `fix/package-a-measurement-qc-20261124` ist mit PR #31 gemergt und abgeschlossen.
 - **Arbeitspakete für Claude Code:** `Paket A` (Mess-QC, Commits `90473f4`, `354bfbe`), `Paket B` (guided session QC, Commit `ce2bbb3`) und `Paket C` (Filter-Export, Saxx/Mosconi-Adapter) sind implementiert und Bestandteil von PR #31 (gemergt am 27.11.2026, laut GitHub `MERGED`).
-- **Bezeichnung (Festlegung):** „Paket A/B/C“ bezieht sich ausschließlich auf die Pakete aus PR #31. Die Bezeichnung „Package A“ bzw. „Paket B“ im Commit `b0abfb3` meint die Saxx/Mosconi-Mapping-Integrität und ist davon zu unterscheiden. Für diese Integritätsarbeit gilt künftig die Bezeichnung „Mapping-Integrität“.
-- **Review-Stand Paket A/B:** Kein unabhängiges Review für Paket A oder B dokumentiert. Eine Paket-A- oder Paket-B-Spezifikation fehlt. Die 331 zugehörigen Tests laufen grün.
-- **Review-Stand PR #31:** Befund G1 (`build_preview`) ist behoben, unabhängig geprüft (`APPROVED`), committet und gepusht (`4253dee`). PR #31 ist gemergt.
-- **G2 (Mosconi `delay_to_steps`/`delay_grid_value`):** implementiert, von Sonnet 5.5 unabhängig mit `APPROVED` geprüft, separat committet und gepusht (`3ed4fef`); Ubuntu- und Windows-CI erfolgreich.
+- **Bezeichnung (Festlegung):** „Paket A/B/C“ bezieht sich auf die Pakete aus PR #31. Die Labels in Commit `b0abfb3` sind davon zu trennen: „Package A (release integrity)“ meint die Release-Bindung in `filter_export`, „Package B (Saxx mapping integrity)“ meint die Saxx-Mapping-Integrität. Für das zweite Label gilt künftig „Mapping-Integrität“.
+- **Review-Stand Paket A/B:** Kein unabhängiges Review für Paket A oder B ist in Commit-Nachrichten, `docs/` oder `AGENTS.md` dokumentiert. Eine Spezifikation für Paket A oder B wurde in `docs/` und `AGENTS.md` nicht gefunden (Suche am 28.11.2026; Commit `bbae768` ist noch nicht geprüft).
+- **Review-Stand PR #31:** Befund G1 (`build_preview`) ist behoben, committet und gepusht (`4253dee`). Der Review-Vermerk „APPROVED“ steht nur in diesem Dokument, nicht in der Commit-Nachricht. PR #31 ist gemergt.
+- **G2 (Mosconi `delay_to_steps`/`delay_grid_value`):** implementiert, committet und gepusht (`3ed4fef`); Ubuntu- und Windows-CI erfolgreich. Der Review-Vermerk „APPROVED“ (Sonnet 5.5) steht nur in diesem Dokument.
 - **G3 (`-0.0` im Digest, `filter_export.py`):** im Code adressiert durch Commit `b0abfb3` (Normierung in `filter_digest`, Regressionstest `test_filter_export.py`). `tests/test_filter_export.py` läuft grün (92 Tests). G3 ist unabhängig geprüft (`APPROVED`, Review am 28.11.2026). Ausgenommen ist der Legacy-Digest `compute_filters_digest` (nur Version 1.0), der laut Docstring absichtlich ohne `-0.0`-Normierung arbeitet.
 - **Weiterhin offen:** Hardwarevalidierung (`hardware_validated: false`), reales Saxx-Template sowie Einbindung in Subwoofer-Generator, Pipeline/CLI und Phase-Gate.
 - **Reale Messdaten:** Frühjahr 2027
