@@ -91,6 +91,30 @@ class TestPipelineFilterExport:
         assert (tmp_path / "out" / "filter_export_kef.json").exists()
         assert not (tmp_path / "out" / "filter_export_saxx.json").exists()
 
+    def test_stale_exports_from_previous_run_are_removed(self, tmp_path, monkeypatch):
+        """Review-Befund PR #32: alte Exporte duerfen nicht neben neuem Report liegen bleiben."""
+        import spatial_analyzer.pipeline as pl
+        from spatial_analyzer.filter_export import FilterExportError
+
+        out = tmp_path / "out"
+        _write(tmp_path / "in.json", [_synthetic_position_with_sub(f"p{i}") for i in range(4)])
+        run_pipeline(tmp_path / "in.json", out)
+        assert (out / "filter_export_kef.json").exists() and (out / "filter_export_saxx.json").exists()
+
+        # Lauf 2 ohne Sub-Daten: Saxx-Export muss verschwinden.
+        _write(tmp_path / "in.json", [_synthetic_position(f"p{i}") for i in range(4)])
+        run_pipeline(tmp_path / "in.json", out)
+        assert not (out / "filter_export_saxx.json").exists()
+
+        # Lauf 3: Bau scheitert -> auch der KEF-Export muss verschwinden.
+        def _fail(**kwargs):
+            raise FilterExportError("simuliert")
+
+        monkeypatch.setattr(pl, "build_filter_export", _fail)
+        report = run_pipeline(tmp_path / "in.json", out)
+        assert not (out / "filter_export_kef.json").exists()
+        assert any("filter_export_kef.json nicht geschrieben" in n for n in report.notes)
+
     def test_export_is_deterministic(self, tmp_path):
         _write(tmp_path / "in.json", [_synthetic_position_with_sub(f"p{i}") for i in range(4)])
         run_pipeline(tmp_path / "in.json", tmp_path / "a")

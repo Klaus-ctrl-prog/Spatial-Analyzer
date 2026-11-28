@@ -647,10 +647,19 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
     export_kefplayer_json(output_dir / "kefplayer_profile.json", filters_l, filters_r, name=profile_name)
     export_rew_generic_eq_txt(output_dir / "rew_eq_L.txt", filters_l, header_comment=rew_header)
     export_rew_generic_eq_txt(output_dir / "rew_eq_R.txt", filters_r, header_comment=rew_header)
+    # fail-closed: Exporte aus frueheren Laeufen, die in diesem Lauf nicht
+    # erzeugt wurden, entfernen - sonst laege z. B. eine alte RELEASED-Datei
+    # neben einem neuen Report.
+    for filename in _FILTER_EXPORT_FILES:
+        if filename not in filter_exports:
+            (output_dir / filename).unlink(missing_ok=True)
     for filename, doc in filter_exports.items():
         write_filter_export(output_dir / filename, doc, overwrite=True)
 
     return report
+
+
+_FILTER_EXPORT_FILES = ("filter_export_kef.json", "filter_export_saxx.json")
 
 
 def _build_filter_exports(
@@ -667,7 +676,8 @@ def _build_filter_exports(
     Saxx immer BLOCKED). Der Saxx-Export enthaelt nur die Phase aus
     optimize_phase_only(); Subwoofer-PEQs berechnet der Kern (noch) nicht.
     Ein Vertragsfehler bricht die Analyse nicht ab, sondern wird als Hinweis
-    gemeldet (fail-closed: dann wird keine Exportdatei geschrieben).
+    gemeldet (fail-closed: dann wird keine Exportdatei geschrieben und eine
+    gleichnamige Datei aus einem frueheren Lauf entfernt, siehe run_pipeline).
     """
     measurement_set_id = hashlib.sha256(input_path.read_bytes()).hexdigest()
     run_id = f"run-{measurement_set_id[:12]}"
