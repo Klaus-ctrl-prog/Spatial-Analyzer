@@ -41,7 +41,8 @@ def _real_no_harm(filters_l, filters_r):
     phase = np.deg2rad(180.0 + np.array([0.0, -5.0, 5.0]))[:, None]
     l_complex = np.ones((3, freq.size), dtype=np.complex128)
     r_complex = 0.5 * np.exp(1j * phase) * np.ones((3, freq.size))
-    return validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, filters_l, filters_r)
+    return validate_no_harm(freq, ["p1", "p2", "p3"], l_complex, r_complex, filters_l, filters_r,
+                            target_db=np.full(freq.size, -6.0))
 
 
 def _sub_doc(**kw):
@@ -58,7 +59,8 @@ def _kef_doc(filters=None, no_harm=None, **kw):
     filters = [PeakingFilter("peq", 100.0, -4.0, 1.0)] if filters is None else filters
     nh = _real_no_harm(filters, filters) if no_harm is None else no_harm
     sat = [EqProposal(f, "mode") for f in filters]
-    args = dict(run_id="r", target_device="kef_ls50_wireless", no_harm=nh, measurement_set_id="m",
+    args = dict(run_id="r", target_device="kef_ls50_wireless", no_harm=nh,
+                measurement_set_id=nh.checked_data_sha256 or "m",  # F2: Nachweis gehoert zu dieser Messung
                 eq_proposals_l=sat, eq_proposals_r=sat)
     args.update(kw)
     return build_filter_export(**args)
@@ -379,7 +381,7 @@ def test_kef_negative_zero_gain_still_released_g3():
     assert nh.status is NoHarmStatus.SAFE
     sat = [EqProposal(PeakingFilter("peq", 100.0, -0.0, 1.0), "mode")]
     doc = build_filter_export(run_id="r", target_device="kef_ls50_wireless", no_harm=nh,
-                              measurement_set_id="m", eq_proposals_l=sat, eq_proposals_r=sat)
+                              measurement_set_id=nh.checked_data_sha256, eq_proposals_l=sat, eq_proposals_r=sat)
     assert doc["approval"]["status"] == "RELEASED"
 
 

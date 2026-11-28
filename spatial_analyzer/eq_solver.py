@@ -17,6 +17,7 @@ Artefakte deutlich als NICHT FREIGEGEBEN.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -230,6 +231,11 @@ class NoHarmResult:
     # min_positions >= MIN_POSITIONS_FOR_NO_HARM lief (Schritt-3-Befund F1:
     # eine gelockerte Pruefung darf keine Freigabe begruenden).
     checked_default_tolerances: bool = field(default=False, init=False)
+    # Zielkurvenkriterium ist tatsaechlich gelaufen (target_db uebergeben).
+    checked_target_curve: bool = field(default=False, init=False)
+    # Digest der geprueften Messdaten (freq, Positionen, L/R komplex, Ziel) -
+    # bindet den Nachweis an die Messung (Schritt-3-Befund F2).
+    checked_data_sha256: str | None = field(default=None, init=False)
 
     @property
     def is_released(self) -> bool:
@@ -355,4 +361,35 @@ def validate_no_harm(
         and target_tolerance_db == DEFAULT_TARGET_HARM_TOLERANCE_DB
         and min_positions >= MIN_POSITIONS_FOR_NO_HARM,
     )
+    object.__setattr__(result, "checked_target_curve", target_db is not None)
+    object.__setattr__(
+        result, "checked_data_sha256",
+        measurement_data_digest(freq_hz, position_ids, l_complex, r_complex, target_db),
+    )
     return result
+
+
+def measurement_data_digest(
+    freq_hz: np.ndarray,
+    position_ids: list[str],
+    l_complex: np.ndarray,
+    r_complex: np.ndarray,
+    target_db: np.ndarray | None,
+) -> str:
+    """SHA-256 ueber die Daten einer Do-No-Harm-Pruefung (deterministisch;
+    -0.0 wird zu 0.0 normiert, Formen und Positions-IDs gehen mit ein)."""
+    h = hashlib.sha256(b"spatial_analyzer.no_harm_data.v1\0")
+
+    def _arr(x: np.ndarray | None, dtype: type) -> None:
+        if x is None:
+            h.update(b"none\0")
+            return
+        a = np.ascontiguousarray(np.asarray(x, dtype=dtype) + 0.0)  # -0.0 -> 0.0
+        h.update(repr(a.shape).encode() + b"\0" + a.tobytes())
+
+    _arr(freq_hz, np.float64)
+    h.update("\x1f".join(position_ids).encode("utf-8") + b"\0")
+    _arr(l_complex, np.complex128)
+    _arr(r_complex, np.complex128)
+    _arr(target_db, np.float64)
+    return h.hexdigest()

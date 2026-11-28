@@ -222,6 +222,10 @@ def build_filter_export(
         and checked_sha == _filters_digest(doc["filters"])
         and no_harm.n_positions >= MIN_POSITIONS_FOR_NO_HARM
         and no_harm.checked_default_tolerances is True  # F1: keine gelockerte Pruefung
+        and no_harm.checked_target_curve is True  # Zielkurvenkriterium muss gelaufen sein
+        # F2: Nachweis gilt nur fuer die Messung, ueber die er lief.
+        and isinstance(no_harm.checked_data_sha256, str)
+        and measurement_set_id == no_harm.checked_data_sha256
         and not _has_crossovers(doc["crossovers"])  # F3: Weichen/Phase sind nicht im Digest
     )
     if released:
