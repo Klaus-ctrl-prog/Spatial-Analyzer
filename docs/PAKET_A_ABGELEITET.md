@@ -15,17 +15,17 @@ Betroffene Module: `compare.py`, `pipeline.py`, `reporting.py`, `exporters.py`, 
 Jede Anforderung nennt den Commit, aus dem sie abgeleitet wurde. Die Anforderungen beschreiben das Verhalten des Codes, nicht ein fachlich richtiges Verhalten.
 
 - **A1 L/R-Trennung (`90473f4`):** Referenz-Impulsantwort, Modenkandidaten, Bestätigungen, Kammfilter-Ausschlüsse und Cut-Vorschläge werden je Kanal getrennt berechnet.
-- **A2 Fehlende Referenz-IR (`6311e6a`):** Pro Kanal wird eine Hinweismeldung ausgegeben. Der betroffene Kandidat wird nicht für Cut-Vorschläge verwendet.
-- **A3 Vorverstärkung (`90473f4`):** Ohne Angabe wird sie aus den Filtern automatisch bestimmt.
+- **A2 Fehlende Referenz-IR (Warnung `6311e6a`, Ausschluss bereits seit `05ad9dc`):** Pro Kanal wird eine Hinweismeldung ausgegeben (`pipeline.py`, Z. 443 bis 452). Ohne Referenz-IR setzt `pipeline.py`, Z. 304 bis 312, `decay_confirmed = None`; `eq_solver.py`, Z. 97, lässt nur `decay_confirmed is True` zu. Damit geht kein Kandidat dieses Kanals in Cut-Vorschläge ein.
+- **A3 Vorverstärkung (REW-TXT-Pfad `90473f4`, Zweikanal-Pfad bereits seit `05ad9dc`):** Ohne Angabe wird `auto_preamp_db` aufgerufen. Im Zweikanal-Export geschieht das mit beiden Kanälen (`exporters.py`, Z. 142). Im Pfad `exporters.py`, Z. 187, wird nur die übergebene Filterliste verwendet (`filters`, `[]`). Welche Berechnung für welchen Pfad gilt, ist fachlich **OFFEN**.
 - **A4 REW-Messungsliste nach Wiederholung (`90473f4`, `0108d00`):** Ist sie nicht abrufbar, erscheint eine Warnung, und der UUID-Ausgangsstand bleibt unverändert. Ausnahme ist der Probelauf.
-- **A5 QC-Export (`90473f4`):** Die Auswahl umfasst `stopfen_ein`, `teilstopfen` und `offen`.
+- **A5 Portzustand-Option (`90473f4`):** Die CLI-Option `--port-state` von `guided_session` umfasst `stopfen_ein`, `teilstopfen` und `offen` (`guided_session.py`, Z. 1582). Sie betrifft das Notes-Protokoll, keinen QC-Export.
 - **A6 Berichtskompatibilität (`5d164af`, `0108d00`):** Konstruktor und Legacy-Modus bleiben erhalten.
 - **A7 Sparse-Bins (`26e3b3c`, `64ba0f7`):** Streuungsmaße erzeugen keine Laufzeitwarnungen.
-- **A8 Berichtsausgabe (`8399a10`):** API-Vergleich und Ausrichtung sind im Bericht beschrieben.
+- **A8 Berichtsausgabe (`8399a10`):** Der HTML-Vergleichsbericht (`compare.py`) beschreibt, ob und in welchem Band die Pegelangleichung erfolgte. Zusätzlich Tests für die Vergleichs-API.
 
 ## Testabdeckung
 
-Die Tests in `test_compare.py`, `test_exporters.py`, `test_guided_session.py`, `test_pipeline.py`, `test_reporting.py` und `test_averaging.py` decken A1 bis A8 zumindest teilweise ab. Die Abdeckung von A5 (`teilstopfen`) ist nicht im Detail geprüft.
+Die Tests in `test_compare.py`, `test_exporters.py`, `test_guided_session.py`, `test_pipeline.py`, `test_reporting.py` und `test_averaging.py` decken A1 bis A8 zumindest teilweise ab. Für A5 belegt `tests/test_guided_session.py`, Z. 1145 bis 1149, nur den Parser für `teilstopfen`. Ob die Option fachlich richtig wirkt, ist nicht geprüft. Für A1 bis A4 und A6 bis A8 ist die Abdeckung nicht je Anforderung geprüft (**OFFEN**).
 
 ## OFFEN (fachliche Entscheidung des Projektleiters)
 
