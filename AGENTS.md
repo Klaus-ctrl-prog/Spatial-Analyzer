@@ -17,14 +17,14 @@
 
 | Rolle | Aufgaben | Grenze |
 |---|---|---|
-| **ChatGPT / Codex** (Architekt, Spezifikations-Hüter, unabhängiger Reviewer) | Schnittstellenverträge (`filter_export.schema.json`), Tabellen-Spezifikationen, Offline-Validierungswerkzeuge und Checklisten erstellen/prüfen; Draft-PRs gegen Spezifikationen und diese Verfassung reviewen | Code-Reviews strikt read-only; keine Schreib- oder Merge-Rechte |
+| **Claude Sonnet, Review-Sitzung** (unabhängiger Reviewer, ab 28.11.2026 statt ChatGPT/Codex) | Neue Sitzung ohne Kontext der Arbeitssitzung, `/code-review medium <PR>`; Schnittstellenverträge (`filter_export.schema.json`), Tabellen-Spezifikationen, Offline-Validierungswerkzeuge und Checklisten erstellen/prüfen; Draft-PRs gegen Spezifikationen und diese Verfassung reviewen | Code-Reviews strikt read-only; keine Schreib- oder Merge-Rechte |
 | **Claude Code** (Implementierer, Test-Ausführer) | Freigegebene Pakete im lokalen Git-Arbeitsbaum umsetzen, `pytest` ausführen, Review-Befunde beheben, Draft-PRs auf GitHub erstellen | Kein automatischer Arbeitsbeginn ohne Freigabe; kein stilles Refactoring geprüfter Funktionen/Tests |
-| **Projektleiter** (Mensch) | Pakete freigeben, Vier-Augen-Review (Claude + ChatGPT) prüfen, finalen Merge durchführen | Einziger, der einen Merge in `main` freigibt und ausführt |
+| **Projektleiter** (Mensch) | Pakete freigeben, Vier-Augen-Review (Arbeitssitzung + Review-Sitzung) prüfen, finalen Merge durchführen | Einziger, der einen Merge in `main` freigibt und ausführt |
 
 ## 2. Ablauf je Arbeitspaket (Vier-Augen-Prinzip)
 1. **Plan & Check (nur lesend):** Claude prüft den tatsächlichen lokalen Repository-Zustand, benennt die exakten Ansatzpunkte und wartet auf die ausdrückliche Freigabe des Projektleiters.
 2. **Umsetzung & Test:** Claude implementiert das freigegebene Paket auf dem Arbeits-Branch ohne stilles Refactoring bestehender geprüfter Funktionen/Tests, führt betroffene `pytest`-Tests und vor dem **Draft-PR** die gesamte Test-Suite aus.
-3. **Unabhängiges Review:** ChatGPT prüft den Draft-PR read-only gegen diese `AGENTS.md` und die Spezifikationen und klassifiziert das Ergebnis eindeutig als `APPROVED`, `CHANGES_REQUIRED` oder `INCONCLUSIVE`.
+3. **Unabhängiges Review:** Eine neue Claude-Sonnet-Sitzung (nicht die Arbeitssitzung) prüft den Draft-PR read-only gegen diese `AGENTS.md` und die Spezifikationen und klassifiziert das Ergebnis eindeutig als `APPROVED`, `CHANGES_REQUIRED` oder `INCONCLUSIVE`.
 4. **Abschluss:** Claude behebt eventuelle `CHANGES_REQUIRED`-Befunde; nach grünem Testlauf und `APPROVED`-Review erteilt der Projektleiter die Merge-Freigabe.
 
 ## 3. Git- & Sicherheitsregeln (verbindlich)
