@@ -44,7 +44,25 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("after_dir", help="Ausgabeverzeichnis der Nachher-Messung")
     compare.add_argument("output_dir", help="Zielverzeichnis fuer compare_report.json/html")
 
+    saxx = subparsers.add_parser(
+        "saxx-preview",
+        help="Zeigt die Saxx-DS120-Abbildung eines filter_export.json (nur Vorschau, keine Datei, keine Hardware).",
+    )
+    saxx.add_argument("export_json", help="Pfad zu filter_export_saxx.json (aus 'analyze')")
+
     return parser
+
+
+def _run_saxx_preview(path: str) -> int:
+    from spatial_analyzer.adapters.saxx_ds120 import SaxxAdapterError, build_preview, render_preview
+    from spatial_analyzer.filter_export import FilterExportError, load_filter_export
+
+    try:
+        print(render_preview(build_preview(load_filter_export(path))), end="")
+    except (FilterExportError, SaxxAdapterError, ValueError) as exc:
+        print(f"Saxx-Vorschau nicht moeglich: {exc}")
+        return 1
+    return 0
 
 
 def _run_dry_run(input_path: str) -> int:
@@ -97,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
         for note in compare_report.notes:
             print(f"Hinweis: {note}")
         return 0
+
+    if args.command == "saxx-preview":
+        return _run_saxx_preview(args.export_json)
 
     parser.error(f"Unbekannter Befehl: {args.command}")
     return 2
