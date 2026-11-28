@@ -302,10 +302,14 @@ def test_crossover_frequency_quantization_documented_and_range_checked():
 def test_safe_export_with_uncovered_subwoofer_filters_is_blocked_by_adapter():
     f = [PeakingFilter("peq", 50.0, -3.0, 4.0)]
     doc = build_filter_export(run_id="r", target_device="saxx_ds120", no_harm=SAFE, measurement_set_id="m", subwoofer_filters=f)
-    assert doc["approval"]["do_no_harm"] == "SAFE" and doc["approval"]["status"] == "BLOCKED"
-    with pytest.raises(AdapterBlockedError, match="nicht an die exportierten Filter gebunden"):
+    assert doc["approval"]["do_no_harm"] == "INCONCLUSIVE" and doc["approval"]["status"] == "BLOCKED"
+    with pytest.raises(AdapterBlockedError, match="keine Abbildung"):
         map_export_to_edit(doc)
-    assert "nicht an die exportierten Filter gebunden" in render_preview(build_preview(doc))
+    # Aeltere 1.1-Datei (vor F4) mit do_no_harm SAFE: weiterhin gueltig, aber blockiert und erklaert.
+    old = {**doc, "approval": {**doc["approval"], "do_no_harm": "SAFE"}}
+    with pytest.raises(AdapterBlockedError, match="nicht an die exportierten Filter gebunden"):
+        map_export_to_edit(old)
+    assert "nicht an die exportierten Filter gebunden" in render_preview(build_preview(old))
 
 
 def test_huge_phase_value_is_mapping_error_not_crash():

@@ -80,7 +80,8 @@ def test_saxx_export_is_always_blocked_with_no_scope_even_on_safe():
     """Regression: Saxx-Exporte duerfen nie RELEASED werden (kein Subwoofer-Do-No-Harm-Modell)."""
     doc = _sub_doc()
     assert doc["approval"] == {
-        "status": "BLOCKED", "do_no_harm": "SAFE", "hardware_validated": False,
+        # F4: kein Subwoofer-Do-No-Harm-Modell -> INCONCLUSIVE, nie das KEF-Urteil SAFE
+        "status": "BLOCKED", "do_no_harm": "INCONCLUSIVE", "hardware_validated": False,
         "checked_scope": "none", "checked_filters_sha256": None,
     }
     assert doc["contract_version"] == "1.1"
@@ -94,7 +95,9 @@ def test_saxx_export_is_always_blocked_with_no_scope_even_on_safe():
 @pytest.mark.parametrize("status", [NoHarmStatus.UNSAFE, NoHarmStatus.INCONCLUSIVE])
 def test_unreleased_status_is_blocked(status):
     doc = _sub_doc(no_harm=NoHarmResult(status, "x", 1))
-    assert doc["approval"]["status"] == "BLOCKED" and doc["approval"]["do_no_harm"] == status.value
+    assert doc["approval"]["status"] == "BLOCKED" and doc["approval"]["do_no_harm"] == "INCONCLUSIVE"
+    kef = _kef_doc(no_harm=NoHarmResult(status, "x", 5))  # KEF uebernimmt das Urteil unveraendert
+    assert kef["approval"]["status"] == "BLOCKED" and kef["approval"]["do_no_harm"] == status.value
 
 
 def test_satellite_filters_never_exported_to_subwoofer_device():

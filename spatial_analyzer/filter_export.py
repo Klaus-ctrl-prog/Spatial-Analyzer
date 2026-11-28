@@ -192,7 +192,9 @@ def build_filter_export(
         "target_device": target_device,
         "approval": {
             "status": "BLOCKED",  # unten gesetzt, sobald alle Freigabebedingungen gelten
-            "do_no_harm": no_harm.status.value,
+            # Subwoofer-Geraete: kein eigenes Do-No-Harm-Modell -> INCONCLUSIVE statt
+            # des KEF-L/R-Urteils (Schritt-3-Befund F4: kein irrefuehrendes SAFE).
+            "do_no_harm": no_harm.status.value if is_kef else NoHarmStatus.INCONCLUSIVE.value,
             "hardware_validated": False,
             "checked_scope": checked_scope,
             "checked_filters_sha256": checked_sha,
@@ -219,10 +221,16 @@ def build_filter_export(
         and doc["intentional_flat"] is False
         and checked_sha == _filters_digest(doc["filters"])
         and no_harm.n_positions >= MIN_POSITIONS_FOR_NO_HARM
+        and no_harm.checked_default_tolerances is True  # F1: keine gelockerte Pruefung
+        and not _has_crossovers(doc["crossovers"])  # F3: Weichen/Phase sind nicht im Digest
     )
     if released:
         doc["approval"]["status"] = "RELEASED"
     return validate_filter_export(doc)
+
+
+def _has_crossovers(xo: Any) -> bool:
+    return isinstance(xo, dict) and bool(xo.get("hpf") or xo.get("lpf") or "phase_deg" in xo)
 
 
 def _finite(v: Any) -> bool:
@@ -410,6 +418,11 @@ def validate_filter_export(doc: Any) -> dict[str, Any]:
             problems.append("approval.status RELEASED ist bei intentional_flat nicht zulaessig.")
         if not (isinstance(fl, dict) and (fl.get("eq_proposals_l") or fl.get("eq_proposals_r"))):
             problems.append("approval.status RELEASED erfordert mindestens einen KEF-Satellitenfilter.")
+        if _has_crossovers(xo):
+            problems.append(
+                "approval.status RELEASED ist mit crossovers (hpf/lpf/phase_deg) nicht zulaessig: "
+                "sie sind nicht vom Pruefdigest erfasst."
+            )
 
     # Freigabebindung: RELEASED nur, wenn die geprueften Filter den exportierten entsprechen.
     if not problems and isinstance(ap, dict) and ap.get("status") == "RELEASED":

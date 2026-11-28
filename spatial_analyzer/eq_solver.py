@@ -226,6 +226,10 @@ class NoHarmResult:
     target_dev_after_db: float | None = None
     checked_scope: str = field(default=CHECKED_SCOPE_NONE, init=False)
     checked_filters_sha256: str | None = field(default=None, init=False)  # Digest der geprueften L/R-Filter
+    # True nur, wenn validate_no_harm() mit den Standard-Toleranzen und
+    # min_positions >= MIN_POSITIONS_FOR_NO_HARM lief (Schritt-3-Befund F1:
+    # eine gelockerte Pruefung darf keine Freigabe begruenden).
+    checked_default_tolerances: bool = field(default=False, init=False)
 
     @property
     def is_released(self) -> bool:
@@ -343,4 +347,12 @@ def validate_no_harm(
     # Frozen dataclass und init=False: Bindung nur hier, direkt nach dem Erzeugen (siehe Klassen-Docstring).
     object.__setattr__(result, "checked_scope", CHECKED_SCOPE_LEFT_RIGHT)
     object.__setattr__(result, "checked_filters_sha256", peaking_filters_digest(filters_l, filters_r))
+    object.__setattr__(
+        result,
+        "checked_default_tolerances",
+        tolerance_db == DEFAULT_SPATIAL_HARM_TOLERANCE_DB
+        and local_tolerance_db == DEFAULT_LOCAL_HARM_TOLERANCE_DB
+        and target_tolerance_db == DEFAULT_TARGET_HARM_TOLERANCE_DB
+        and min_positions >= MIN_POSITIONS_FOR_NO_HARM,
+    )
     return result
