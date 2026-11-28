@@ -43,6 +43,7 @@ funktionieren unveraendert weiter.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -77,7 +78,9 @@ from spatial_analyzer.grid import interpolate_to_grid, r160_grid
 from spatial_analyzer.lr_sum import compare_predicted_vs_measured, predict_complex_sum
 from spatial_analyzer.models import RoomModel
 from spatial_analyzer.reporting import MeasurementNote, Report, write_frequency_table_csv
+from spatial_analyzer.filter_export import FilterExportError, build_filter_export, write_filter_export
 from spatial_analyzer.sub_optimizer import optimize as optimize_sub
+from spatial_analyzer.sub_optimizer import optimize_phase_only
 from spatial_analyzer.target_curve import TargetCurveConfig, absolute_target_db
 
 MODE_BAND_HZ = (20.0, 200.0)
@@ -510,6 +513,7 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
         notes.append(f"L+R-Summen-Konsistenzpruefung uebersprungen: {exc}.")
 
     sub_result = None
+    sub_result_saxx = None
     has_sub_everywhere = all(p.get("sub") for p in positions)
     if has_sub_everywhere and l_data.phase_deg is not None and r_data.phase_deg is not None:
         try:
@@ -566,8 +570,24 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
                     sub_result = optimize_sub(sub_data.freq_hz, h_lr, h_sub, target_sum)
                 except ValueError as exc:
                     notes.append(f"Subwoofer-Optimierung uebersprungen: {exc}")
+                try:
+                    sub_result_saxx = optimize_phase_only(sub_data.freq_hz, h_lr, h_sub, target_sum)
+                except ValueError as exc:
+                    notes.append(f"Saxx-Phasenoptimierung uebersprungen: {exc}")
+                if sub_result_saxx is not None:
+                    notes.append(
+                        "Saxx-Vorschlag ohne Delay (Phase in 45-Grad-Stufen): "
+                        f"Phase {sub_result_saxx.best_polarity_deg:.0f} Grad, "
+                        f"Sub-Pegel {sub_result_saxx.best_gain_db:+.1f} dB relativ. Modell: konstante "
+                        "Phasendrehung; Vorzeichen der Saxx-Phase nicht hardwarevalidiert "
+                        "(45/315, 90/270, 135/225 Grad ggf. vertauscht)."
+                    )
     else:
         notes.append("Keine vollstaendigen Sub-Messungen fuer alle Positionen - Optimierung uebersprungen.")
+
+    filter_exports = _build_filter_exports(
+        Path(input_path), do_no_harm, eq_proposals_l, eq_proposals_r, sub_result_saxx, notes
+    )
 
     report = Report(
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -627,5 +647,52 @@ def run_pipeline(input_path: str | Path, output_dir: str | Path) -> Report:
     export_kefplayer_json(output_dir / "kefplayer_profile.json", filters_l, filters_r, name=profile_name)
     export_rew_generic_eq_txt(output_dir / "rew_eq_L.txt", filters_l, header_comment=rew_header)
     export_rew_generic_eq_txt(output_dir / "rew_eq_R.txt", filters_r, header_comment=rew_header)
+    for filename, doc in filter_exports.items():
+        write_filter_export(output_dir / filename, doc, overwrite=True)
 
     return report
+
+
+def _build_filter_exports(
+    input_path: Path,
+    do_no_harm: Any,
+    eq_proposals_l: list,
+    eq_proposals_r: list,
+    sub_result_saxx: Any,
+    notes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """filter_export.json (Vertrag 1.1) fuer KEF und - falls Sub-Daten - Saxx.
+
+    Freigabe entscheidet allein build_filter_export (KEF nur bei SAFE usw.,
+    Saxx immer BLOCKED). Der Saxx-Export enthaelt nur die Phase aus
+    optimize_phase_only(); Subwoofer-PEQs berechnet der Kern (noch) nicht.
+    Ein Vertragsfehler bricht die Analyse nicht ab, sondern wird als Hinweis
+    gemeldet (fail-closed: dann wird keine Exportdatei geschrieben).
+    """
+    measurement_set_id = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    run_id = f"run-{measurement_set_id[:12]}"
+    exports: dict[str, dict[str, Any]] = {}
+    try:
+        exports["filter_export_kef.json"] = build_filter_export(
+            run_id=run_id,
+            target_device="kef_ls50_wireless",
+            no_harm=do_no_harm,
+            measurement_set_id=measurement_set_id,
+            eq_proposals_l=eq_proposals_l,
+            eq_proposals_r=eq_proposals_r,
+            intentional_flat=not (eq_proposals_l or eq_proposals_r),
+        )
+    except FilterExportError as exc:
+        notes.append(f"filter_export_kef.json nicht geschrieben: {exc}")
+    if sub_result_saxx is not None:
+        try:
+            exports["filter_export_saxx.json"] = build_filter_export(
+                run_id=run_id,
+                target_device="saxx_ds120",
+                no_harm=do_no_harm,
+                measurement_set_id=measurement_set_id,
+                crossovers={"hpf": None, "lpf": None, "phase_deg": int(round(sub_result_saxx.best_polarity_deg))},
+            )
+        except FilterExportError as exc:
+            notes.append(f"filter_export_saxx.json nicht geschrieben: {exc}")
+    return exports

@@ -8,7 +8,8 @@
 - **Review-Stand PR #31:** Befund G1 (`build_preview`) ist behoben, committet und gepusht (`4253dee`). Der Review-Vermerk „APPROVED“ steht nur in diesem Dokument, nicht in der Commit-Nachricht. PR #31 ist gemergt.
 - **G2 (Mosconi `delay_to_steps`/`delay_grid_value`):** implementiert, committet und gepusht (`3ed4fef`); Ubuntu- und Windows-CI erfolgreich. Der Review-Vermerk „APPROVED“ (Sonnet 5.5) steht nur in diesem Dokument.
 - **G3 (`-0.0` im Digest, `filter_export.py`):** im Code adressiert durch Commit `b0abfb3` (Normierung in `filter_digest`, Regressionstest `test_filter_export.py`). `tests/test_filter_export.py` läuft grün (92 Tests). G3 ist unabhängig geprüft (`APPROVED`, Review am 28.11.2026). Ausgenommen ist der Legacy-Digest `compute_filters_digest` (nur Version 1.0), der laut Docstring absichtlich ohne `-0.0`-Normierung arbeitet.
-- **Weiterhin offen:** Hardwarevalidierung (`hardware_validated: false`), reales Saxx-Template sowie Einbindung in Subwoofer-Generator, Pipeline/CLI und Phase-Gate.
+- **Stand 28.11.2026 (uncommitted, Branch `docs/paket-a-entscheidung`):** Paket A mit vorläufigen Arbeitswerten entschieden (`docs/PAKET_A_SCHWELLEN_ENTSCHEIDUNG.md`, Abschnitt 9). Pipeline schreibt `filter_export_kef.json` und, bei Sub-Daten, `filter_export_saxx.json` (immer BLOCKED). Phase-Gate: `sub_optimizer.optimize_phase_only` (Saxx-Phase in 45°-Stufen, ohne Delay). `optimize()` lehnt andere Winkel als 0/180° ab. CLI `saxx-preview`.
+- **Weiterhin offen:** Hardwarevalidierung (`hardware_validated: false`), Vorzeichen der Saxx-Phase (90/270° ggf. vertauscht), reales Saxx-Template, Subwoofer-PEQs im Kern, Validierung der Arbeitswerte mit realen Messdaten.
 - **Reale Messdaten:** Frühjahr 2027
 - **Saxx-Hardware-Rundtest:** ab April 2027
 

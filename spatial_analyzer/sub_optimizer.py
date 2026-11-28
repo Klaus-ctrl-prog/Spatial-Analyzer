@@ -158,6 +158,15 @@ def optimize(
     ausschliesslich algorithmische Verifikation an synthetischen Daten,
     keine Aussage ueber ein reales Fahrzeug- oder Wohnzimmerverhalten.
     """
+    # _complex_sum kennt nur 0/180 Grad (Vorzeichen); jeder andere Wert wuerde
+    # stillschweigend als 180 Grad gerechnet. Phasendrehungen in 45-Grad-
+    # Stufen: optimize_phase_only().
+    bad = [p for p in polarities_deg if not np.isclose(p % 180.0, 0.0)]
+    if bad:
+        raise ValueError(
+            f"polarities_deg {bad} nicht zulaessig: optimize() kennt nur 0/180 Grad. "
+            "Fuer Phasenstufen optimize_phase_only() verwenden."
+        )
     freq_hz = np.asarray(freq_hz, dtype=np.float64)
     h_lr_per_position = np.asarray(h_lr_per_position, dtype=np.complex128)
     h_sub_per_position = np.asarray(h_sub_per_position, dtype=np.complex128)
@@ -253,6 +262,90 @@ def optimize(
         score_grid=score_grid,
         mode_band_hz=mode_band_hz,
         mode_band_rmse_at_best_db=mode_band_rmse,
+    )
+
+
+SAXX_PHASE_STEPS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
+
+
+def _rotated_spl_db(h_lr: np.ndarray, h_sub: np.ndarray, gain_db: float, phase_deg: float) -> np.ndarray:
+    """|H_LR + 10**(g/20) * H_Sub * exp(-j*phi)| in dB, Form (n_positions, n_freqs)."""
+    h = h_lr + 10.0 ** (gain_db / 20.0) * h_sub * np.exp(-1j * np.deg2rad(phase_deg))
+    return 20.0 * np.log10(np.maximum(np.abs(h), 1e-12))
+
+
+def optimize_phase_only(
+    freq_hz: np.ndarray,
+    h_lr_per_position: np.ndarray,
+    h_sub_per_position: np.ndarray,
+    target_spl_db: np.ndarray,
+    band_hz: tuple[float, float] = (50.0, 120.0),
+    mode_band_hz: tuple[float, float] = DEFAULT_MODE_BAND_HZ,
+    gain_range_db: tuple[float, float] = DEFAULT_GAIN_RANGE_DB,
+    gain_step_db: float = 0.5,
+    phases_deg: tuple[float, ...] = SAXX_PHASE_STEPS_DEG,
+    weights: ObjectiveWeights = ObjectiveWeights(),
+) -> SubOptimizerResult:
+    """Grid-Search ueber (Pegel, Phase) OHNE Delay - fuer Ketten ohne Sub-Delay
+    (Saxx DS 120: Phase 0..315 Grad in 45-Grad-Stufen, kein Delay; KEF-Sub-Out
+    ohne Delay). Zielfunktion identisch zu optimize() (70/30).
+
+    Modell: frequenzunabhaengige Phasendrehung exp(-j*phi). Ob der Saxx eine
+    konstante Drehung oder ein Allpass realisiert und welches Vorzeichen seine
+    Phasenangabe hat, ist NICHT hardwarevalidiert - 45/315, 90/270 und
+    135/225 Grad koennen vertauscht sein (0 und 180 Grad sind eindeutig).
+    Ergebnis: best_delay_ms = 0.0, best_polarity_deg = beste Phase,
+    score_grid Form (n_phases, n_gains, 1).
+    """
+    freq_hz = np.asarray(freq_hz, dtype=np.float64)
+    h_lr = np.asarray(h_lr_per_position, dtype=np.complex128)
+    h_sub = np.asarray(h_sub_per_position, dtype=np.complex128)
+    target = np.asarray(target_spl_db, dtype=np.float64)
+    if h_lr.ndim != 2 or h_sub.shape != h_lr.shape:
+        raise ValueError("h_lr_per_position und h_sub_per_position brauchen gleiche Form (n_positions, n_freqs)")
+    if h_lr.shape[0] < 2:
+        raise ValueError("mindestens 2 Positionen noetig (raeumliche Streuung)")
+    if h_lr.shape[1] != freq_hz.shape[0] or target.shape[0] != freq_hz.shape[0]:
+        raise ValueError("freq_hz, h_*_per_position (Spalten) und target_spl_db muessen gleich lang sein")
+    if not phases_deg:
+        raise ValueError("phases_deg darf nicht leer sein")
+    band = (freq_hz >= band_hz[0]) & (freq_hz <= band_hz[1])
+    if not np.any(band):
+        raise ValueError(f"Uebergangsband {band_hz} Hz liegt ausserhalb von freq_hz")
+    if not (np.all(np.isfinite(h_lr[:, band])) and np.all(np.isfinite(h_sub[:, band]))
+            and np.all(np.isfinite(target[band]))):
+        raise ValueError(f"NaN/Inf innerhalb des Uebergangsbands {band_hz} Hz")
+    mode = band & (freq_hz >= mode_band_hz[0]) & (freq_hz <= mode_band_hz[1])
+
+    gains = np.arange(gain_range_db[0], gain_range_db[1] + gain_step_db / 2, gain_step_db)
+    score_grid = np.empty((len(phases_deg), len(gains), 1), dtype=np.float64)
+    best_score, best = np.inf, (0.0, float(phases_deg[0]))
+    for pi, phi in enumerate(phases_deg):
+        for gi, g in enumerate(gains):
+            spl = _rotated_spl_db(h_lr[:, band], h_sub[:, band], g, phi)
+            rmse = float(np.sqrt(np.mean((np.mean(spl, axis=0) - target[band]) ** 2)))
+            spatial = float(np.mean(np.std(spl, axis=0, ddof=1)))
+            score = weights.target_weight * rmse + weights.spatial_weight * spatial
+            score_grid[pi, gi, 0] = score
+            if score < best_score:
+                best_score, best = score, (float(g), float(phi))
+
+    mode_rmse = float("nan")
+    if np.any(mode):
+        spl = _rotated_spl_db(h_lr[:, mode], h_sub[:, mode], best[0], best[1])
+        mode_rmse = float(np.sqrt(np.mean((np.mean(spl, axis=0) - target[mode]) ** 2)))
+
+    return SubOptimizerResult(
+        best_gain_db=best[0],
+        best_delay_ms=0.0,
+        best_polarity_deg=best[1],
+        best_score=best_score,
+        gain_grid_db=gains,
+        delay_grid_ms=np.zeros(1),
+        polarity_grid_deg=np.asarray(phases_deg, dtype=np.float64),
+        score_grid=score_grid,
+        mode_band_hz=mode_band_hz,
+        mode_band_rmse_at_best_db=mode_rmse,
     )
 
 

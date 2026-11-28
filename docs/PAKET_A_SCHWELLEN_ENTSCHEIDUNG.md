@@ -120,3 +120,19 @@ Die fünf Werte im Code entsprechen exakt den Mittelwerten für Sinus-Bursts. Da
 3. **Knick-Widerspruch im Paper:** Für die Dokumentation den Verweis auf Abschnitt 6.1 setzen?
 4. **Cut-Grenzen:** Herkunft nachweisen oder als Arbeitswert festlegen?
 5. **Harm-Toleranzen, Konsistenz, Frequenztoleranzen:** Arbeitswerte bestätigen oder ersetzen?
+
+## 9. Entscheidungen (technische Projektleitung, 28.11.2026)
+
+Grundsatz: keine Wertänderung ohne Messdaten. Alle Werte bleiben im Code unverändert und gelten als **vorläufige Arbeitswerte** bis zur Prüfung mit realen Messungen (Frühjahr 2027). Die Sicherheit liegt nicht in den Schwellen, sondern im Do-No-Harm-Gate, das jeden Export blockiert, der die Mehrpunkt-Vorschau verschlechtert.
+
+| Frage | Entscheidung | Begründung | Grenze |
+|---|---|---|---|
+| 8.1 Abklingzeit | Stützpunkte gelten als belegt; log-log-Interpolation und konstante Fortsetzung als Projektentscheidung festgeschrieben | Werte wörtlich aus Fazenda et al. 2015; konstante Fortsetzung ist die einfachste nicht extrapolierende Annahme | Unter 32 Hz und über 200 Hz nicht belegt |
+| 8.2 Übertragung auf REW | Extrapolierte Abklingzeit (−5 bis −25 dB) wird als Schätzung zugelassen, nicht als Paper-äquivalent | Ein Cut erfolgt nur bei `decay_confirmed is True`, ist auf 9 dB begrenzt und muss den Do-No-Harm-Check bestehen | 2027 an realen IRs prüfen: T20- gegen T30-Extrapolation, Abweichung > 20 % → Schwelle neu bewerten |
+| 8.3 Knick 63/100 Hz | Nur dokumentieren, keine Code-Wirkung | Das Modell interpoliert zwischen Stützpunkten und nutzt keinen Knick | – |
+| 8.4 Cut-Grenzen | −9 dB je Mode und ±6 dB breitbandig als Arbeitswert festgelegt | Konservativ gegen Überkorrektur; Do-No-Harm prüft zusätzlich | Anhebungen im Bass sind raumabhängig riskant; mit realen Daten prüfen, ob +6 dB auf +3 dB sinken sollte |
+| 8.5 Toleranzen | 0,5/2,0/0,5 dB, 3 Positionen, Konsistenz 0,7, 2 Hz und 3 Hz als Arbeitswerte bestätigt | Grenzfälle führen zu INCONCLUSIVE oder „kein Cut“, also zu keinem Export | Mit realen Wiederholmessungen die Messstreuung bestimmen; Toleranz ≥ 2 × Streuung |
+| A3 Vorverstärkung | Automatisch (`auto_preamp_db`) bleibt Standard | Verhindert Clipping durch Anhebungen | – |
+| A5 `teilstopfen` | Reines Protokollfeld, ohne Rechenwirkung | So implementiert und getestet (Parser) | – |
+
+Damit ist Paket A **fachlich abgeschlossen mit vorläufigen Arbeitswerten**. Offen bleibt nur die Validierung mit realen Messdaten.
