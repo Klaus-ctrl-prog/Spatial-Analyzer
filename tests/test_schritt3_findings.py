@@ -66,16 +66,22 @@ def test_data_digest_is_deterministic_and_sensitive():
     assert base != d(f, ["a", "b", "c"], l2, l, np.zeros(5))  # Messwert
     assert base != d(f, ["a", "b", "c"], l, l, np.full(5, 0.1))  # Zielkurve
     assert base != d(f, ["a", "b", "c"], l, l, None)
+    # Review #34: Trennzeichen in IDs duerfen nicht kollidieren
+    assert d(f, ["a\x1fb", "c"], l[:2], l[:2], None) != d(f, ["a", "b\x1fc"], l[:2], l[:2], None)
 
 
 def test_pipeline_kef_export_binds_measurement(tmp_path):
-    from tests.test_pipeline import _synthetic_position
-    (tmp_path / "in.json").write_text(json.dumps({"positions": [_synthetic_position(f"p{i}") for i in range(4)]}),
-                                      encoding="utf-8")
+    """Review #34: muss tatsaechlich Filter und eine vollstaendige Pruefung erzeugen."""
+    from tests.test_pipeline import _write_synthetic_input
+    _write_synthetic_input(tmp_path / "in.json")  # konsistente 60-Hz-Mode -> Cut-Vorschlag
     report = run_pipeline(tmp_path / "in.json", tmp_path / "out")
+    assert report.eq_proposals_l or report.eq_proposals_r
+    digest = report.do_no_harm.checked_data_sha256
+    assert isinstance(digest, str) and len(digest) == 64
     kef = json.loads((tmp_path / "out" / "filter_export_kef.json").read_text("utf-8"))
-    if report.do_no_harm.checked_data_sha256:
-        assert kef["provenance"]["measurement_set_id"] == report.do_no_harm.checked_data_sha256
+    assert kef["provenance"]["measurement_set_id"] == digest
+    expected = "RELEASED" if report.do_no_harm.status.value == "SAFE" else "BLOCKED"
+    assert kef["approval"]["status"] == expected
 
 
 def test_default_check_is_released():

@@ -388,7 +388,10 @@ def measurement_data_digest(
         h.update(repr(a.shape).encode() + b"\0" + a.tobytes())
 
     _arr(freq_hz, np.float64)
-    h.update("\x1f".join(position_ids).encode("utf-8") + b"\0")
+    h.update(len(position_ids).to_bytes(8, "big"))
+    for pid in position_ids:  # laengenpraefixiert: keine Kollision durch Trennzeichen in IDs
+        b = str(pid).encode("utf-8")
+        h.update(len(b).to_bytes(8, "big") + b)
     _arr(l_complex, np.complex128)
     _arr(r_complex, np.complex128)
     _arr(target_db, np.float64)
