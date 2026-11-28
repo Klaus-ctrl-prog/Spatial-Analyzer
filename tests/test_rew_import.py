@@ -12,6 +12,7 @@ from spatial_analyzer.rew_import import (
     RewImportError,
     build_pipeline_input,
     import_from_manifest,
+    import_warnings,
 )
 from spatial_analyzer.validator import has_errors, validate_file
 
@@ -31,9 +32,18 @@ def _entry(position, channel, uuid, status="completed", aba_state=None, notes="K
 
 
 def _manifest(entries, **overrides):
-    manifest = {"manifest_version": 2, "profile": "wohnzimmer", "dry_run": False, "entries": entries}
+    manifest = {
+        "manifest_version": 2,
+        "profile": "wohnzimmer",
+        "dry_run": False,
+        "entries": entries,
+        "timing_qc": {"status": "INCONCLUSIVE", "reason": "keine dokumentierte REW-Timing-Information verfuegbar"},
+    }
     manifest.update(overrides)
     return manifest
+
+
+TIMING_OK = {"timing_qc": {"status": "OK", "reason": "Test"}}
 
 
 def _lr_entries(positions=("P01", "P02", "P03")):
@@ -45,13 +55,17 @@ class FakeRewClient:
     REW V5.20.13 belegt): linearer, ungeglaetteter Frequenzgang, IR mit t=0
     bei Index -startTime/sampleInterval."""
 
-    def __init__(self, smoothing="None", phase_delay_s=1e-4):
+    def __init__(self, smoothing="None", phase_delay_s=1e-4, start_hz=15.0, broken=False):
+        self.start_hz = start_hz
+        self.broken = broken
         self.smoothing = smoothing
         self.phase_delay_s = phase_delay_s
         self.ir_calls = []
 
     def get_frequency_response(self, uuid):
-        freq = 15.0 + np.arange(8000) * 0.5  # 15 ... ~4015 Hz, linear
+        if self.broken:
+            return {"freq_hz": np.array([20.0, 10.0]), "spl_db": np.array([1.0, 2.0]), "smoothing": "None"}
+        freq = self.start_hz + np.arange(8000) * 0.5  # linear, 0,5 Hz
         seed = sum(map(ord, uuid))
         spl = 75.0 + 3.0 * np.sin(freq / 37.0 + seed) + 6.0 * np.exp(-(((freq - 46.0) / 4.0) ** 2))
         phase = -360.0 * freq * self.phase_delay_s
@@ -91,7 +105,7 @@ class TestBuildPipelineInput:
         assert "impulse_response" not in result["positions"][1]["l"]
 
     def test_frequency_grid_contains_full_r160_lattice(self):
-        result = build_pipeline_input(_manifest(_lr_entries()), FakeRewClient())
+        result = build_pipeline_input(_manifest(_lr_entries(), **TIMING_OK), FakeRewClient())
         freq = np.asarray(result["positions"][1]["r"]["freq_hz"])
         steps = np.log10(freq) * R160_STEPS_PER_DECADE
         on_lattice = np.isclose(steps, np.round(steps), atol=1e-9)
@@ -102,7 +116,7 @@ class TestBuildPipelineInput:
         assert len(result["positions"][1]["r"]["phase_deg"]) == freq.size
 
     def test_phase_is_unwrapped_before_interpolation(self):
-        result = build_pipeline_input(_manifest(_lr_entries()), FakeRewClient(phase_delay_s=1e-4))
+        result = build_pipeline_input(_manifest(_lr_entries(), **TIMING_OK), FakeRewClient(phase_delay_s=1e-4))
         channel = result["positions"][1]["l"]
         expected = -360.0 * np.asarray(channel["freq_hz"]) * 1e-4
         # Rohphase ist gewickelt; entpackt+interpoliert muss die Gerade herauskommen.
@@ -156,7 +170,7 @@ class TestBuildPipelineInput:
     def test_fast_rotating_phase_is_refined_not_rejected(self):
         # 20 ms Restlaufzeit wie bei echten REW-Daten: Raster wird verdichtet,
         # jeder Phasenschritt < 90 Grad, Phase bleibt die korrekte Gerade.
-        result = build_pipeline_input(_manifest(_lr_entries()), FakeRewClient(phase_delay_s=0.02))
+        result = build_pipeline_input(_manifest(_lr_entries(), **TIMING_OK), FakeRewClient(phase_delay_s=0.02))
         channel = result["positions"][1]["l"]
         freq = np.asarray(channel["freq_hz"])
         phase = np.asarray(channel["phase_deg"])
@@ -172,9 +186,11 @@ class TestBuildPipelineInput:
 
         client = FakeRewClient(phase_delay_s=0.02)
         raw = client.get_frequency_response("P02-L")
-        result = build_pipeline_input(_manifest(_lr_entries()), client)
+        result = build_pipeline_input(_manifest(_lr_entries(), **TIMING_OK), client)
         channel = result["positions"][1]["l"]
         grid = r160_grid(min(channel["freq_hz"]), max(channel["freq_hz"]))
+        raw_grid = r160_grid(float(raw["freq_hz"][0]), float(raw["freq_hz"][-1]))
+        np.testing.assert_array_equal(grid, raw_grid)
         raw_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(raw["phase_deg"])))
         np.testing.assert_allclose(
             interpolate_to_grid(np.asarray(channel["freq_hz"]), np.asarray(channel["spl_db"]), grid),
@@ -188,6 +204,52 @@ class TestBuildPipelineInput:
         )
 
 
+    def test_without_timing_ok_no_phase_is_exported(self):
+        result = build_pipeline_input(_manifest(_lr_entries()), FakeRewClient())
+        assert all("phase_deg" not in p[ch] for p in result["positions"] for ch in ("l", "r"))
+
+    def test_grid_matches_raw_when_start_is_on_non_idempotent_r160_node(self):
+        # k=192: ceil(log10(10**(192/160))/(1/160)) ergibt 193 (Fliesskomma) -
+        # der Knoten ist nicht idempotent (Review PR #36, Befund 3).
+        k = 192
+        step = 1.0 / 160  # wie in grid.r160_grid
+        start = float(np.power(10.0, k * step))
+        assert int(np.ceil(np.log10(start) / step)) != k
+        client = FakeRewClient(start_hz=start)
+        result = build_pipeline_input(_manifest(_lr_entries()), client)
+        freq = result["positions"][1]["l"]["freq_hz"]
+        raw = client.get_frequency_response("P02-L")["freq_hz"]
+        assert freq[0] == raw[0] and freq[-1] == raw[-1]
+        from spatial_analyzer.grid import r160_grid
+
+        np.testing.assert_array_equal(
+            r160_grid(min(freq), max(freq)), r160_grid(float(raw[0]), float(raw[-1]))
+        )
+
+    def test_aba_only_manifest_has_specific_message(self):
+        entries = [_entry("P01", "L", "a", aba_state="A1"), _entry("P01", "L", "b", aba_state="B")]
+        with pytest.raises(RewImportError, match="nur A-B-A"):
+            build_pipeline_input(_manifest(entries), FakeRewClient())
+
+    def test_unusable_rew_data_raises_import_error(self):
+        with pytest.raises(RewImportError, match="nicht verwertbar"):
+            build_pipeline_input(_manifest(_lr_entries()), FakeRewClient(broken=True))
+
+    def test_import_warnings_report_timing_and_qc(self):
+        entries = _lr_entries()
+        entries[0]["qc_findings"] = [
+            {"severity": "warning", "check": "clipping", "message": "nicht pruefbar"},
+            {"severity": "ok", "check": "noise_floor", "message": "SNR 80 dB"},
+        ]
+        entries[1]["metadata_findings"] = [{"field": "micCalPath", "problem": "fehlend", "message": "keine Kalibrierdatei"}]
+        warnings = import_warnings(_manifest(entries))
+        assert any("Phase nicht uebernommen" in w for w in warnings)
+        assert any("P01_L: QC clipping" in w for w in warnings)
+        assert not any("noise_floor" in w for w in warnings)
+        assert any("P01_R: Metadaten micCalPath" in w for w in warnings)
+        assert not any("Phase" in w for w in import_warnings(_manifest(_lr_entries(), **TIMING_OK)))
+
+
 class TestEndToEnd:
     def test_import_output_runs_through_validator_and_pipeline(self, tmp_path):
         manifest_path = tmp_path / "session_manifest.json"
@@ -197,6 +259,9 @@ class TestEndToEnd:
         assert not has_errors(validate_file(out))
         report = run_pipeline(out, tmp_path / "run")
         assert not any("sofa_mitte" in n and "Keine Position" in n for n in report.notes)
+        # Ohne Timing-Freigabe keine Phase -> Gate INCONCLUSIVE, Export gesperrt.
+        assert any("Do-No-Harm-Check uebersprungen" in n for n in report.notes)
+        assert (tmp_path / "run" / "NICHT_FREIGEGEBEN.txt").exists()
         assert (tmp_path / "run").is_dir()
 
     def test_cli_import_rew(self, tmp_path, monkeypatch, capsys):
@@ -208,7 +273,9 @@ class TestEndToEnd:
         out = tmp_path / "in.json"
         rc = cli.main(["import-rew", str(manifest_path), str(out), "--room", "5.72", "3.72", "2.40"])
         assert rc == 0
-        assert "Positionen: 3" in capsys.readouterr().out
+        out_text = capsys.readouterr().out
+        assert "Positionen: 3" in out_text
+        assert "Hinweis: Phase nicht uebernommen" in out_text
         assert out.exists()
 
     def test_cli_import_rew_reports_error(self, tmp_path, monkeypatch, capsys):

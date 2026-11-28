@@ -10,7 +10,9 @@ arbeitet der `analyze`-Befehl auf der dokumentierten JSON-Zwischenform
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from spatial_analyzer.compare import run_compare
 from spatial_analyzer.pipeline import run_pipeline
@@ -70,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_import_rew(manifest: str, output: str, room: list[float] | None, base_url: str | None) -> int:
     from spatial_analyzer.rew_client import DEFAULT_BASE_URL, ReadOnlyRewClient, RewApiError
-    from spatial_analyzer.rew_import import RewImportError, import_from_manifest
+    from spatial_analyzer.rew_import import RewImportError, import_from_manifest, import_warnings
 
     client = ReadOnlyRewClient(base_url=base_url or DEFAULT_BASE_URL, timeout_s=60.0)
     try:
@@ -81,6 +83,12 @@ def _run_import_rew(manifest: str, output: str, room: list[float] | None, base_u
     n_sub = sum(1 for p in result["positions"] if "sub" in p)
     print(f"Eingabe-JSON geschrieben nach: {output}")
     print(f"Positionen: {len(result['positions'])} (davon mit Sub: {n_sub})")
+    try:
+        manifest_data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest_data = {}
+    for warning in import_warnings(manifest_data):
+        print(f"Hinweis: {warning}")
     return 0
 
 

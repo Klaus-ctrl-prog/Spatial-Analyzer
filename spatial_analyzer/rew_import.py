@@ -14,6 +14,16 @@ Festlegungen (Projektleiter, 28.11.2026):
 - `P01` (Sofamitte) wird zur Pipeline-Referenzposition `sofa_mitte`.
 - Ein Saxx-Kanal (`SAXX`/`SUB`) wird optional als `sub` uebernommen.
 
+Phase nur mit Timing-Nachweis: REW setzt t=0 je Messung auf den Peak, die
+Phase enthaelt eine beliebige Restlaufzeit. Ohne `timing_qc.status == "OK"`
+im Manifest (Paket B, `require_phase_evaluation`) ist der Laufzeitbezug
+zwischen L, R und Sub undefiniert. Dann wird KEINE Phase ausgegeben; die
+Pipeline meldet das Do-No-Harm-Gate INCONCLUSIVE und blockiert den Export.
+Heute liefert `determine_timing_qc` immer INCONCLUSIVE.
+
+Hinweis: das Profil `wohnzimmer` kennt derzeit nur L/R; `SAXX`/`SUB`
+kommen erst vor, wenn die guided session um den Saxx-Kanal erweitert ist.
+
 Strikt statt still: fehlende Kanaele, doppelte Messungen, Dry-Run- oder
 Legacy-Manifeste und ein nur teilweise vorhandener Sub fuehren zu
 `RewImportError`, nie zu stillschweigend ergaenzten oder verworfenen Daten.
@@ -104,6 +114,10 @@ def _select_entries(manifest: dict[str, Any]) -> dict[str, dict[str, dict[str, A
         slot[channel] = entry
 
     if not selected:
+        if any(e.get("aba_state") is not None for e in manifest.get("entries", [])):
+            raise RewImportError(
+                "Manifest enthaelt nur A-B-A-Messungen (Vergleichsfolge) - keine Positionsmessungen"
+            )
         raise RewImportError("Manifest enthaelt keine abgeschlossenen Messungen")
     if REFERENCE_SOURCE_POSITION not in selected:
         raise RewImportError(f"Referenzposition {REFERENCE_SOURCE_POSITION} (Sofamitte) fehlt")
@@ -121,14 +135,21 @@ def _select_entries(manifest: dict[str, Any]) -> dict[str, dict[str, dict[str, A
     return selected
 
 
-def _resample_channel(fr: dict[str, Any], name: str) -> dict[str, Any]:
+def timing_ok(manifest: dict[str, Any]) -> bool:
+    timing = manifest.get("timing_qc")
+    return isinstance(timing, dict) and timing.get("status") == "OK"
+
+
+def _resample_channel(fr: dict[str, Any], name: str, with_phase: bool) -> dict[str, Any]:
     freq = np.asarray(fr["freq_hz"], dtype=np.float64)
     spl = np.asarray(fr["spl_db"], dtype=np.float64)
     if fr.get("smoothing") not in (None, "None"):
         raise RewImportError(f"{name}: Frequenzgang ist geglaettet ({fr.get('smoothing')!r})")
-    grid = r160_grid(float(freq[0]), float(freq[-1]))
+    # Rohendpunkte mitliefern: so ergibt sich in der Pipeline derselbe
+    # gemeinsame Bereich (common_start/end) wie aus den Rohdaten.
+    grid = np.unique(np.concatenate([[freq[0]], r160_grid(float(freq[0]), float(freq[-1])), [freq[-1]]]))
     phase = None
-    if fr.get("phase_deg") is not None:
+    if with_phase and fr.get("phase_deg") is not None:
         unwrapped = np.rad2deg(np.unwrap(np.deg2rad(np.asarray(fr["phase_deg"], dtype=np.float64))))
         grid, phase = _refine_for_phase(freq, unwrapped, grid, name)
     channel: dict[str, Any] = {
@@ -185,6 +206,7 @@ def build_pipeline_input(
 ) -> dict[str, Any]:
     """Baut das Pipeline-Eingabe-Dict (Format siehe `pipeline.py`)."""
     selected = _select_entries(manifest)
+    with_phase = timing_ok(manifest)
     positions: list[dict[str, Any]] = []
     # Referenzposition zuerst, dann P02.. in fester Reihenfolge.
     order = [REFERENCE_SOURCE_POSITION] + sorted(p for p in selected if p != REFERENCE_SOURCE_POSITION)
@@ -193,9 +215,14 @@ def build_pipeline_input(
         position: dict[str, Any] = {"id": REFERENCE_POSITION_ID if is_reference else source_id}
         for channel, entry in sorted(selected[source_id].items()):
             name = str(entry.get("measurement_name") or f"{source_id}_{channel}")
-            data = _resample_channel(client.get_frequency_response(entry["uuid"]), name)
-            if is_reference and channel in ("l", "r"):
-                data["impulse_response"] = _windowed_ir(client.get_impulse_response(entry["uuid"]), name)
+            try:
+                data = _resample_channel(client.get_frequency_response(entry["uuid"]), name, with_phase)
+                if is_reference and channel in ("l", "r"):
+                    data["impulse_response"] = _windowed_ir(client.get_impulse_response(entry["uuid"]), name)
+            except RewImportError:
+                raise
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                raise RewImportError(f"{name}: REW-Daten nicht verwertbar ({exc})") from exc
             notes = entry.get("notes_text")
             if notes:
                 data["notes"] = str(notes)
@@ -206,6 +233,31 @@ def build_pipeline_input(
     if room_dimensions_m is not None:
         result["room_dimensions_m"] = [float(v) for v in room_dimensions_m]
     return result
+
+
+def import_warnings(manifest: dict[str, Any]) -> list[str]:
+    """Hinweise, die der Import nicht in die Pipeline-JSON uebernimmt:
+    fehlende Timing-Freigabe (Phase verworfen) und QC-/Metadaten-Warnungen
+    der verwendeten Messungen aus der guided session."""
+    warnings: list[str] = []
+    if not timing_ok(manifest):
+        timing = manifest.get("timing_qc") or {}
+        reason = timing.get("reason", "kein Timing-QC im Manifest") if isinstance(timing, dict) else "ungueltig"
+        warnings.append(
+            f"Phase nicht uebernommen (Timing-QC nicht OK: {reason}) - Do-No-Harm-Gate wird INCONCLUSIVE, "
+            "Exporte bleiben gesperrt"
+        )
+    for entry in manifest.get("entries", []):
+        if entry.get("status", "completed") != "completed" or entry.get("aba_state") is not None:
+            continue
+        name = entry.get("measurement_name")
+        for finding in entry.get("qc_findings") or []:
+            if isinstance(finding, dict) and finding.get("severity") != "ok":
+                warnings.append(f"{name}: QC {finding.get('check')}: {finding.get('message')}")
+        for finding in entry.get("metadata_findings") or []:
+            if isinstance(finding, dict):
+                warnings.append(f"{name}: Metadaten {finding.get('field', '')}: {finding.get('message', finding)}")
+    return warnings
 
 
 def import_from_manifest(
