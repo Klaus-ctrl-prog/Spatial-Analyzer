@@ -351,8 +351,18 @@ class QcFinding:
         return f"[{label}] {self.check}: {self.message}"
 
 
+# Sicherheitsabstand vor t=0 der REW-IR fuer das Pre-Trigger-Rauschsegment
+# (Arbeitswert): Klirrprodukte eines Sweeps erscheinen kurz vor t=0.
+PRETRIGGER_GUARD_S = 0.1
+
+
 def check_clipping(ir_samples: np.ndarray, thresholds: QcThresholds) -> QcFinding:
-    """Peak-Pruefung. Setzt voraus, dass die IR-Samples auf +-1.0 normiert
+    """Derzeit im Ablauf ungenutzt: die REW-API liefert die IR peak-normiert
+    (am echten REW V5.20.13 belegt, offener Punkt 21), daher meldet die
+    guided session Clipping als nicht pruefbar. Bleibt fuer nicht normierte
+    Quellen erhalten.
+
+    Peak-Pruefung. Setzt voraus, dass die IR-Samples auf +-1.0 normiert
     sind ("dBFS"); diese Annahme ist laut raum_akustik.md Abschnitt 15.6
     (offener Punkt 21) fuer die echte REW-Export-Kette NICHT verifiziert -
     bis zur Verifikation ist das Ergebnis ein relativer Arbeitswert, keine
@@ -374,11 +384,19 @@ def check_clipping(ir_samples: np.ndarray, thresholds: QcThresholds) -> QcFindin
     return QcFinding("ok", "clipping", f"Peak bei {peak_dbfs:.1f} dBFS, kein Clipping-Verdacht")
 
 
-def check_pretrigger_noise(ir_samples: np.ndarray, thresholds: QcThresholds) -> QcFinding:
+def check_pretrigger_noise(
+    ir_samples: np.ndarray, thresholds: QcThresholds, pretrigger_end: int | None = None
+) -> QcFinding:
     """SNR zwischen Pre-Trigger-Segment (Rauschboden) und Peak (Messregel 5:
-    'Stoergeraeusche beachten, verrauschte Messungen wiederholen')."""
+    'Stoergeraeusche beachten, verrauschte Messungen wiederholen').
+
+    `pretrigger_end` (optional) begrenzt das Pre-Trigger-Segment zusaetzlich
+    hart auf Samples vor diesem Index (z. B. t=0 der REW-IR abzueglich
+    Sicherheitsabstand), damit der Peak nie im Rauschsegment liegt."""
     samples = np.asarray(ir_samples, dtype=np.float64)
     pretrigger_n = int(samples.size * thresholds.pretrigger_fraction)
+    if pretrigger_end is not None:
+        pretrigger_n = min(pretrigger_n, max(int(pretrigger_end), 0))
     if samples.size < 4 or pretrigger_n < 2:
         return QcFinding("warning", "noise_floor", "zu wenige Samples fuer Pre-Trigger-Rauschanalyse")
     pre = samples[:pretrigger_n]
@@ -1214,16 +1232,34 @@ def _detect_and_qc(
 
     try:
         freq_response = client.get_frequency_response(measurement.uuid)
-        qc_data["spl_db"] = np.asarray(freq_response.get("spl", []), dtype=np.float64)
-        qc_data["freq_hz"] = np.asarray(freq_response.get("freq", []), dtype=np.float64)
+        qc_data["spl_db"] = np.asarray(freq_response["spl_db"], dtype=np.float64)
+        qc_data["freq_hz"] = np.asarray(freq_response["freq_hz"], dtype=np.float64)
     except RewApiError as exc:
         print_fn(f"Hinweis: Frequenzgang nicht abrufbar ({exc}) - SPL-QC ausgelassen.")
 
     try:
-        ir = client.get_impulse_response_raw(measurement.uuid)
+        ir_response = client.get_impulse_response(measurement.uuid)
+        ir = ir_response["samples"]
         qc_data["ir_samples"] = ir
-        qc_findings.append(check_clipping(ir, qc_thresholds))
-        qc_findings.append(check_pretrigger_noise(ir, qc_thresholds))
+        # Am echten REW V5.20.13 belegt (28.11.2026): die API liefert die IR
+        # auf Peak 1.0 normiert (unit "percent"). `check_clipping` wuerde
+        # dann immer 0 dBFS melden - Clipping ist aus der IR nicht pruefbar
+        # (raum_akustik.md Abschnitt 15.6, offener Punkt 21).
+        qc_findings.append(
+            QcFinding(
+                "warning",
+                "clipping",
+                "aus der REW-Impulsantwort nicht pruefbar (REW normiert auf Peak) - "
+                "Eingangspegel in REW selbst kontrollieren",
+            )
+        )
+        # REW-IR: t=0 (Peak-Bezug) liegt bei Index -startTime/sampleInterval.
+        # Das Rauschsegment endet sicher davor (Abstand PRETRIGGER_GUARD_S).
+        t0_index = int(round(-ir_response["start_time_s"] / ir_response["sample_interval_s"]))
+        guard = int(round(PRETRIGGER_GUARD_S / ir_response["sample_interval_s"]))
+        qc_findings.append(
+            check_pretrigger_noise(ir, qc_thresholds, pretrigger_end=t0_index - guard)
+        )
     except RewApiError as exc:
         print_fn(f"Hinweis: Impulsantwort nicht abrufbar ({exc}) - IR-QC ausgelassen.")
 

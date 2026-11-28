@@ -55,8 +55,11 @@ class _FakeClient:
     """Minimaler Ersatz fuer ReadOnlyRewClient, der nur die drei vom Modul
     genutzten Methoden anbietet - absichtlich kein echter Netzwerk-Client."""
 
-    def __init__(self, measurements, freq_responses=None, impulse_responses=None, raise_on_list=None):
+    def __init__(
+        self, measurements, freq_responses=None, impulse_responses=None, raise_on_list=None, ir_timing=None
+    ):
         self._measurements = measurements
+        self._ir_timing = ir_timing or {}
         self._freq_responses = freq_responses or {}
         self._impulse_responses = impulse_responses or {}
         self._raise_on_list = raise_on_list
@@ -71,6 +74,15 @@ class _FakeClient:
 
     def get_impulse_response_raw(self, uuid):
         return self._impulse_responses[uuid]
+
+    def get_impulse_response(self, uuid):
+        # Standard: t=0 weit hinter den kurzen Test-IRs (10-%-Regel greift).
+        start_time_s, interval_s = self._ir_timing.get(uuid, (-1.0, 1e-3))
+        return {
+            "samples": np.asarray(self._impulse_responses[uuid], dtype=np.float64),
+            "start_time_s": start_time_s,
+            "sample_interval_s": interval_s,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +265,20 @@ class TestCheckPretriggerNoise:
 
     def test_too_few_samples_warns(self):
         finding = check_pretrigger_noise(np.array([1.0, 2.0]), QcThresholds())
+        assert finding.severity == "warning"
+
+    def test_pretrigger_end_caps_noise_segment_before_peak(self):
+        # Peak liegt innerhalb der ersten 10 %: ohne Begrenzung landet er im
+        # Rauschsegment (SNR ~0 dB), mit pretrigger_end davor nicht.
+        rng = np.random.default_rng(0)
+        samples = rng.normal(0.0, 1e-4, 1000)
+        samples[50] = 1.0
+        assert check_pretrigger_noise(samples, QcThresholds()).severity == "warning"
+        assert check_pretrigger_noise(samples, QcThresholds(), pretrigger_end=40).severity == "ok"
+
+    def test_pretrigger_end_negative_gives_warning(self):
+        samples = np.concatenate([np.full(100, 1e-6), [1.0]])
+        finding = check_pretrigger_noise(samples, QcThresholds(), pretrigger_end=-5)
         assert finding.severity == "warning"
 
 
@@ -516,7 +542,7 @@ class TestRunGuidedSessionWithFakeClient:
         ir = np.concatenate([np.full(10, 1e-6), [0.5], np.zeros(20)])
         client = _FakeClient(
             measurements=[],
-            freq_responses={"u1": {"freq": freqs.tolist(), "spl": np.full(10, 70.0).tolist()}},
+            freq_responses={"u1": {"freq_hz": freqs.tolist(), "spl_db": np.full(10, 70.0).tolist()}},
             impulse_responses={"u1": ir},
         )
         # Baseline (vor dem ersten Sweep) ist leer, erst nach der
@@ -551,8 +577,55 @@ class TestRunGuidedSessionWithFakeClient:
         assert entry.measurement_name == "P01_L"
         assert entry.uuid == "u1"
         assert entry.detection_status == "ok"
-        assert any(f["check"] == "clipping" for f in entry.qc_findings)
+        clipping = [f for f in entry.qc_findings if f["check"] == "clipping"]
+        assert len(clipping) == 1
+        # REW normiert die IR auf Peak 1.0 -> Clipping ist nicht pruefbar
+        # und darf nicht als "ok" erscheinen.
+        assert clipping[0]["severity"] == "warning"
+        assert "nicht pruefbar" in clipping[0]["message"]
+        assert any(f["check"] == "noise_floor" for f in entry.qc_findings)
         assert (tmp_path / "notes" / "P01_L.txt").exists()
+
+    def test_session_passes_t0_limit_to_pretrigger_check(self, tmp_path):
+        # Peak bei Index 1500 liegt in den ersten 10 % (2000 Samples). Ohne
+        # t0-Grenze waere noise_floor eine Warnung; die Session leitet aus
+        # startTime/sampleInterval t0=1500 ab, Ende = 1500 - 0,1 s/1e-4 = 500.
+        profile = PROFILES["wohnzimmer"]
+        freqs = np.linspace(20, 200, 10)
+        rng = np.random.default_rng(1)
+        ir = rng.normal(0.0, 1e-4, 20000)
+        ir[1500:1900] += np.exp(-np.arange(400) / 100.0)  # Peak + Nachklingen
+        client = _FakeClient(
+            measurements=[],
+            freq_responses={"u1": {"freq_hz": freqs.tolist(), "spl_db": np.full(10, 70.0).tolist()}},
+            impulse_responses={"u1": ir},
+            ir_timing={"u1": (-0.15, 1e-4)},
+        )
+        assert check_pretrigger_noise(ir, QcThresholds()).severity == "warning"
+        responses = [[], [_meta("u1")]]
+        call_log = {"n": 0}
+
+        def list_measurements():
+            idx = min(call_log["n"], len(responses) - 1)
+            call_log["n"] += 1
+            return responses[idx]
+
+        client.list_measurements = list_measurements
+        inputs = iter(["", "q"])
+        manifest = run_guided_session(
+            profile,
+            use_aba=False,
+            client=client,
+            manifest_path=tmp_path / "manifest.json",
+            notes_dir=tmp_path / "notes",
+            kef_host=None,
+            dry_run=False,
+            input_fn=lambda _: next(inputs),
+            print_fn=lambda _: None,
+        )
+        noise = [f for f in manifest.entries[0].qc_findings if f["check"] == "noise_floor"]
+        assert len(noise) == 1
+        assert noise[0]["severity"] == "ok"
 
     def test_multiple_new_measurements_detected_warns_and_skips_qc(self, tmp_path):
         profile = PROFILES["wohnzimmer"]
@@ -597,8 +670,8 @@ class TestRunGuidedSessionWithFakeClient:
         client = _FakeClient(
             measurements=[],
             freq_responses={
-                "a1": {"freq": freqs.tolist(), "spl": a1_spl.tolist()},
-                "a2": {"freq": freqs.tolist(), "spl": a2_spl.tolist()},
+                "a1": {"freq_hz": freqs.tolist(), "spl_db": a1_spl.tolist()},
+                "a2": {"freq_hz": freqs.tolist(), "spl_db": a2_spl.tolist()},
             },
             impulse_responses={"a1": quiet_ir, "a2": quiet_ir},
         )
@@ -651,7 +724,7 @@ def _scripted_client(responses, uuids=("u1", "u2", "u3", "u4")):
     ir = np.concatenate([np.full(10, 1e-6), [0.5], np.zeros(20)])
     client = _FakeClient(
         measurements=[],
-        freq_responses={u: {"freq": freqs.tolist(), "spl": np.full(10, 70.0).tolist()} for u in uuids},
+        freq_responses={u: {"freq_hz": freqs.tolist(), "spl_db": np.full(10, 70.0).tolist()} for u in uuids},
         impulse_responses={u: ir for u in uuids},
     )
     state = {"n": 0}
