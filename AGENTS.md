@@ -5,7 +5,7 @@
 - **Arbeitspakete für Claude Code:** `Paket A`, `Paket B` und `Paket C` sind implementiert und Bestandteil von PR #31 (gemergt am 27.11.2026, laut GitHub `MERGED`).
 - **Review-Stand PR #31:** Befund G1 (`build_preview`) ist behoben, unabhängig geprüft (`APPROVED`), committet und gepusht (`4253dee`). PR #31 ist gemergt.
 - **G2 (Mosconi `delay_to_steps`/`delay_grid_value`):** implementiert, von Sonnet 5.5 unabhängig mit `APPROVED` geprüft, separat committet und gepusht (`3ed4fef`); Ubuntu- und Windows-CI erfolgreich.
-- **G3 (`-0.0` im Digest, `filter_export.py`):** im Code adressiert durch Commit `b0abfb3` (Normierung in `filter_digest`, Regressionstest `test_filter_export.py`). `tests/test_filter_export.py` läuft grün (92 Tests). Ein unabhängiges Review für G3 ist nicht dokumentiert.
+- **G3 (`-0.0` im Digest, `filter_export.py`):** im Code adressiert durch Commit `b0abfb3` (Normierung in `filter_digest`, Regressionstest `test_filter_export.py`). `tests/test_filter_export.py` läuft grün (92 Tests). G3 ist unabhängig geprüft (`APPROVED`, Review am 28.11.2026). Ausgenommen ist der Legacy-Digest `compute_filters_digest` (nur Version 1.0), der laut Docstring absichtlich ohne `-0.0`-Normierung arbeitet.
 - **Weiterhin offen:** Hardwarevalidierung (`hardware_validated: false`), reales Saxx-Template sowie Einbindung in Subwoofer-Generator, Pipeline/CLI und Phase-Gate.
 - **Reale Messdaten:** Frühjahr 2027
 - **Saxx-Hardware-Rundtest:** ab April 2027
